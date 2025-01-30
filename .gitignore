@@ -1,0 +1,35 @@
+# .gitignore
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+
+# Ansible
+.ansible/
+inventory.ini
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.python-version
+
+# Node/Yarn
+node_modules/
+.yarn/
+.yarnrc
+.pnp.*
+yarn.lock
+
+# IDE
+.vscode/
+.cursor/
+
+# Local files
+*.log
+backup.tfstate
+provider.conf
+
+# System Files
+.DS_Store
