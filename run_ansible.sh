@@ -42,13 +42,17 @@ while true; do
     sleep 5
 done
 
+# Add inventory file dynamically
+echo "[all]" > inventory.ini
+echo "$DROPLET_IP ansible_user=root ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
+
 max_retries=5
 delay=60
 for i in $(seq 1 $max_retries); do
   echo -e "\n${BLUE}Attempt ${CYAN}$i/$max_retries${BLUE} - ${PURPLE}$(date)${NC}"
   ANSIBLE_FORCE_COLOR=true \
   ANSIBLE_HOST_KEY_CHECKING=False \
-  ansible-playbook -vv -u root -i "$DROPLET_IP," deploy.yml && \
+  ansible-playbook -i inventory.ini deploy.yml && \
     echo -e "${GREEN}Deployment successful!${NC}" && exit 0
   
   echo -e "${RED}Attempt $i failed.${NC} ${YELLOW}Retrying in $delay seconds...${NC}"

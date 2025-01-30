@@ -7,7 +7,7 @@ terraform {
     }
   }
   backend "local" {
-    path = ".terraform/terraform.tfstate"
+    lock_timeout = "5m"
   }
 }
 
@@ -35,7 +35,13 @@ resource "digitalocean_droplet" "activist" {
 
   # Wait for droplet to be active and have an IP
   provisioner "local-exec" {
-    command = "while [ \"$(curl -s -X GET -H 'Content-Type: application/json' -H 'Authorization: Bearer ${var.do_token}' 'https://api.digitalocean.com/v2/droplets/${self.id}' | jq -r '.droplet.status')\" != \"active\" ]; do echo 'Waiting for droplet to be active...'; sleep 5; done"
+    command = <<-EOT
+      until IP=$(doctl compute droplet get ${self.id} --format PublicIPv4 --no-header); do
+        echo "Waiting for droplet IP..."
+        sleep 5
+      done
+      echo "Droplet IP: $IP"
+    EOT
   }
 }
 
@@ -72,8 +78,23 @@ resource "null_resource" "wait_for_droplet" {
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
-      DROPLET_IP='${digitalocean_droplet.activist.ipv4_address}'
-      echo "Waiting for droplet IP: $DROPLET_IP"
+      # Wait for IP to be assigned
+      for i in {1..20}; do
+        DROPLET_IP=$(doctl compute droplet get ${digitalocean_droplet.activist.id} --format PublicIPv4 --no-header)
+        if [ ! -z "$DROPLET_IP" ]; then
+          echo "Droplet IP assigned: $DROPLET_IP"
+          break
+        fi
+        echo "Attempt $i: Waiting for IP assignment..."
+        sleep 10
+      done
+
+      if [ -z "$DROPLET_IP" ]; then
+        echo "Failed to get droplet IP after 20 attempts"
+        exit 1
+      fi
+
+      # Wait for SSH
       sleep 30  # Initial wait for system boot
       for i in {1..20}; do
         if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes -i ~/.ssh/id_rsa root@$DROPLET_IP 'exit' 2>/dev/null; then
@@ -83,6 +104,7 @@ resource "null_resource" "wait_for_droplet" {
         echo "Attempt $i: Waiting for SSH..."
         sleep 10
       done
+      
       echo "Failed to establish SSH connection after 20 attempts"
       exit 1
     EOT
@@ -98,7 +120,15 @@ resource "null_resource" "run_ansible" {
   }
 
   provisioner "local-exec" {
-    command = "ANSIBLE_FORCE_COLOR=true bash run_ansible.sh ${digitalocean_droplet.activist.ipv4_address}"
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      DROPLET_IP="${digitalocean_droplet.activist.ipv4_address}"
+      if [ -z "$${DROPLET_IP}" ]; then
+        echo "Error: Empty droplet IP"
+        exit 1
+      fi
+      ANSIBLE_FORCE_COLOR=true bash run_ansible.sh "$${DROPLET_IP}"
+    EOT
   }
 }
 

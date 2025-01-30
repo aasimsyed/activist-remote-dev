@@ -2,7 +2,7 @@
 - name: Deploy Activist Application
   hosts: all
   vars:
-    project_dir: /root/activist
+    project_dir: "/root/activist"
     frontend_dir: "{{ project_dir }}/frontend"
   become: true
 
@@ -37,6 +37,7 @@
           - gnupg
           - lsb-release
           - git
+          - yarn
         state: present
         update_cache: true
       register: apt_result
@@ -112,7 +113,7 @@
         executable: /bin/bash
       changed_when: false
 
-    - name: Install Node.js and npm
+    - name: Install Node.js
       ansible.builtin.apt:
         name: nodejs
         state: present
@@ -129,78 +130,71 @@
         npm install -g npm@latest
       changed_when: false
 
-    - name: Install corepack globally
+    - name: Ensure Corepack is enabled system-wide
+      become: true
       ansible.builtin.shell: |
-        npm install -g corepack
-      register: corepack_install
-      retries: 3
-      delay: 10
-      until: corepack_install is success
-      changed_when: false
-
-    - name: Enable corepack
-      ansible.builtin.shell: |
-        PATH="/usr/local/bin:/usr/bin:/bin:$PATH" corepack enable
-      args:
-        executable: /bin/bash
-      changed_when: false
-
-    - name: Update apt and install Yarn
-      ansible.builtin.apt:
-        name: yarn
-        state: present
-        update_cache: true
-      environment:
-        DEBIAN_FRONTEND: "noninteractive"
-
-    - name: Configure and verify Yarn
-      ansible.builtin.shell: |
-        cd {{ frontend_dir }} && yarn set version berry 2>&1
-        cd {{ frontend_dir }} && yarn install 2>&1
-        YARN_VERSION=$(yarn --version 2>&1)
-        echo "Installed Yarn version: $YARN_VERSION"
-        if [ "$YARN_VERSION" != "4.6.0" ]; then
-          echo "Error: Expected Yarn 4.6.0 but got $YARN_VERSION" >&2
-          exit 1
-        fi
+        corepack enable --install
+        corepack prepare yarn@4.6.0 --activate
       args:
         executable: /bin/bash
       environment:
         PATH: "/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
-      register: yarn_setup
       changed_when: false
 
-    - name: Install pip3
-      ansible.builtin.apt:
-        name: python3-pip
-        state: present
-        update_cache: true
-    - name: Install Python dependencies
-      ansible.builtin.apt:
-        name:
-          - python3-venv
-          - python3-pip
-          - python3-full
-        state: present
-        update_cache: true
+    - name: Set project-specific Yarn version
+      community.general.yarn:
+        path: "{{ frontend_dir }}"
+        version: 4.6.0
+      environment:
+        PATH: "/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
+
+    - name: Install dependencies with zero-installs
+      ansible.builtin.shell: |
+        set -eo pipefail
+        cd {{ frontend_dir }} 2>&1
+        yarn install --immutable --frozen-lockfile 2>&1 | tee -a yarn_install.log
+      args:
+        chdir: "{{ frontend_dir }}"
+        executable: /bin/bash
+      environment:
+        PATH: "/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
+        YARN_ENABLE_INLINE_BUILDS: "1"
+        YARN_ENABLE_LOGS: "0"
+      async: 600
+      poll: 15
+      register: yarn_install
+      retries: 2
+      delay: 30
+      until: yarn_install is success
+      changed_when: false
+
+    - name: Wait for Yarn migration to complete
+      ansible.builtin.async_status:
+        jid: "{{ yarn_migration.ansible_job_id }}"
+      register: yarn_job_result
+      until: yarn_job_result.finished
+      retries: 30
+      delay: 30  # Total wait: 30*30=900s (15min)
+
+    - name: Validate Yarn migration success
+      ansible.builtin.fail:
+        msg: "Yarn migration failed after 15 minutes"
+      when: yarn_job_result.failed
+
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
     - name: Create Python virtual environment
       ansible.builtin.command:
         cmd: python3 -m venv venv
         chdir: "{{ project_dir }}"
         creates: "{{ project_dir }}/venv/bin/activate"
+
     - name: Install Python dependencies
       ansible.builtin.pip:
         requirements: "{{ project_dir }}/backend/requirements-dev.txt"
         virtualenv: "{{ project_dir }}/venv"
         state: present
-    - name: Configure Yarn dependencies
-      ansible.builtin.command:
-        cmd: yarn install --immutable
-        chdir: "{{ frontend_dir }}"
-      environment:
-        YARN_ENABLE_INLINE_BUILDS: "1"
-        NODE_ENV: production
-      changed_when: false
 
     - name: Configure backend port binding
       ansible.builtin.lineinfile:
@@ -208,28 +202,14 @@
         regexp: '("${BACKEND_PORT}:${BACKEND_PORT}")'
         line: '"0.0.0.0:\1"'
         backrefs: true
+
     - name: Configure frontend port binding
       ansible.builtin.lineinfile:
         path: "{{ project_dir }}/docker-compose.yml"
         regexp: '("${FRONTEND_PORT}:${FRONTEND_PORT}")'
         line: '"0.0.0.0:\1"'
         backrefs: true
-    - name: Create .env file
-      ansible.builtin.copy:
-        dest: "{{ project_dir }}/.env"
-        mode: '0644'
-        content: |
-          BACKEND_PORT=8000
-          FRONTEND_PORT=3000
-          DATABASE_NAME=activist
-          DATABASE_USER=postgres
-          DATABASE_PASSWORD=postgres
-          DATABASE_HOST=db
-          DATABASE_PORT=5432
-          DJANGO_ALLOWED_HOSTS=*
-          DEBUG=True
-          SECRET_KEY=your-secret-key-here
-          VITE_FRONTEND_URL=http://localhost:3000
+
     - name: Deploy backend and database first
       community.docker.docker_compose_v2:
         project_src: "{{ project_dir }}"
@@ -240,25 +220,6 @@
           - db
         build: always
         state: present
-    - name: Install frontend dependencies
-      community.docker.docker_container:
-        name: frontend-deps
-        image: node:20
-        command: bash -c "cd /app && yarn install"
-        volumes:
-          - "{{ frontend_dir }}:/app"
-        cleanup: true
-        detach: false
-
-    - name: Build frontend
-      community.docker.docker_container:
-        name: frontend-build
-        image: node:20
-        command: bash -c "cd /app && yarn build"
-        volumes:
-          - "{{ frontend_dir }}:/app"
-        cleanup: true
-        detach: false
 
     - name: Deploy full application stack
       community.docker.docker_compose_v2:
@@ -273,36 +234,3 @@
       until: compose_result is success
       retries: 3
       delay: 10
-
-    - name: Install system packages
-      ansible.builtin.apt:
-        name:
-          - python3-venv
-          - python3-pip
-          - python3-full
-          - nodejs
-          - make
-          - build-essential
-          - libssl-dev
-          - zlib1g-dev
-          - libbz2-dev
-          - libreadline-dev
-          - libsqlite3-dev
-          - wget
-          - curl
-          - llvm
-          - libncursesw5-dev
-          - xz-utils
-          - tk-dev
-          - libxml2-dev
-          - libxmlsec1-dev
-          - libffi-dev
-          - liblzma-dev
-        state: present
-        update_cache: true
-    - name: Build Docker images
-      community.docker.docker_compose_v2:
-        project_src: "{{ project_dir }}"
-        build: "always"
-      async: 600
-      poll: 5
