@@ -101,15 +101,18 @@
         force: true
 
     - name: Setup Node.js repository
-      ansible.builtin.shell: |
-        set -o pipefail
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+      ansible.builtin.uri:
+        url: https://deb.nodesource.com/setup_20.x
+        return_content: true
+      register: node_setup
+
+    - name: Execute Node.js setup script
+      ansible.builtin.shell: "{{ node_setup.content }}"
       args:
-        warn: false
         executable: /bin/bash
       changed_when: false
 
-    - name: Install Node.js
+    - name: Install Node.js and npm
       ansible.builtin.apt:
         name: nodejs
         state: present
@@ -121,14 +124,10 @@
       delay: 10
       until: nodejs_install is success
 
-    - name: Install npm
-      ansible.builtin.apt:
-        name: npm
-        state: present
-      register: npm_install
-      retries: 3
-      delay: 10
-      until: npm_install is success
+    - name: Update npm to latest version
+      ansible.builtin.shell: |
+        npm install -g npm@latest
+      changed_when: false
 
     - name: Install corepack globally
       ansible.builtin.shell: |
@@ -141,7 +140,9 @@
 
     - name: Enable corepack
       ansible.builtin.shell: |
-        /usr/local/bin/corepack enable
+        PATH="/usr/local/bin:/usr/bin:/bin:$PATH" corepack enable
+      args:
+        executable: /bin/bash
       changed_when: false
 
     - name: Update apt and install Yarn

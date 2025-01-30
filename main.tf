@@ -33,49 +33,78 @@ resource "digitalocean_droplet" "activist" {
   monitoring = true
   ssh_keys   = [data.digitalocean_ssh_key.my_key.id]
 
-  connection {
-    type        = "ssh"
-    user        = "root"
-    host        = self.ipv4_address
-    private_key = file("~/.ssh/id_rsa")
-  }
-
+  # Wait for droplet to be active and have an IP
   provisioner "local-exec" {
-    command = "while ! nc -z ${self.ipv4_address} 22; do sleep 1; done"
+    command = "while [ \"$(curl -s -X GET -H 'Content-Type: application/json' -H 'Authorization: Bearer ${var.do_token}' 'https://api.digitalocean.com/v2/droplets/${self.id}' | jq -r '.droplet.status')\" != \"active\" ]; do echo 'Waiting for droplet to be active...'; sleep 5; done"
   }
 }
 
-# Try to fetch existing domain
-data "digitalocean_domain" "existing_domain" {
-  name = "dev-asyed.com"
-  # Prevent errors if domain doesn't exist
-  depends_on = [digitalocean_domain.activist_domain]
-}
-
-# Create domain if it doesn't exist
+# Create domain (will fail silently if exists)
 resource "digitalocean_domain" "activist_domain" {
   name = "dev-asyed.com"
-  # Only create if data source fails
-  count = data.digitalocean_domain.existing_domain.id == null ? 1 : 0
+  lifecycle {
+    ignore_changes = [name]
+  }
 }
 
-# Use either existing or new domain
-locals {
-  domain_name = try(data.digitalocean_domain.existing_domain.name, digitalocean_domain.activist_domain[0].name)
-}
-
-# Update A record to use local variable
+# DNS A record that points to the droplet
 resource "digitalocean_record" "activist_a_record" {
-  depends_on = [digitalocean_droplet.activist]
-  domain    = local.domain_name
-  type      = "A"
-  name      = "activist"
-  value     = digitalocean_droplet.activist.ipv4_address
-  ttl       = 30
+  depends_on = [digitalocean_droplet.activist, digitalocean_domain.activist_domain]
+  domain     = digitalocean_domain.activist_domain.name
+  type       = "A"
+  name       = "activist"
+  value      = digitalocean_droplet.activist.ipv4_address
+  ttl        = 30
 
   lifecycle {
     create_before_destroy = true
   }
+}
+
+# Add IP check and SSH wait as separate resource
+resource "null_resource" "wait_for_droplet" {
+  depends_on = [digitalocean_droplet.activist]
+
+  triggers = {
+    droplet_ip = digitalocean_droplet.activist.ipv4_address
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      DROPLET_IP='${digitalocean_droplet.activist.ipv4_address}'
+      echo "Waiting for droplet IP: $DROPLET_IP"
+      sleep 30  # Initial wait for system boot
+      for i in {1..20}; do
+        if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes -i ~/.ssh/id_rsa root@$DROPLET_IP 'exit' 2>/dev/null; then
+          echo "SSH connection established!"
+          exit 0
+        fi
+        echo "Attempt $i: Waiting for SSH..."
+        sleep 10
+      done
+      echo "Failed to establish SSH connection after 20 attempts"
+      exit 1
+    EOT
+  }
+}
+
+# Ansible runs independently
+resource "null_resource" "run_ansible" {
+  depends_on = [null_resource.wait_for_droplet]
+
+  triggers = {
+    droplet_ip = digitalocean_droplet.activist.ipv4_address
+  }
+
+  provisioner "local-exec" {
+    command = "ANSIBLE_FORCE_COLOR=true bash run_ansible.sh ${digitalocean_droplet.activist.ipv4_address}"
+  }
+}
+
+# Output the consistent FQDN
+output "droplet_fqdn" {
+  value = digitalocean_record.activist_a_record.fqdn
 }
 
 # SSH tunnel depends on Ansible completing the app deployment
@@ -138,22 +167,4 @@ resource "null_resource" "ssh_tunnel" {
       fi
     EOT
   }
-}
-
-# Ansible runs independently
-resource "null_resource" "run_ansible" {
-  depends_on = [digitalocean_droplet.activist]
-
-  triggers = {
-    droplet_ip = digitalocean_droplet.activist.ipv4_address
-  }
-
-  provisioner "local-exec" {
-    command = "ANSIBLE_FORCE_COLOR=true bash run_ansible.sh ${digitalocean_droplet.activist.ipv4_address}"
-  }
-}
-
-# Output the consistent FQDN
-output "droplet_fqdn" {
-  value = digitalocean_record.activist_a_record.fqdn
 }
