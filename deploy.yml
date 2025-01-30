@@ -1,0 +1,306 @@
+---
+- name: Deploy Activist Application
+  hosts: all
+  vars:
+    project_dir: /root/activist
+    frontend_dir: "{{ project_dir }}/frontend"
+  become: true
+
+  handlers:
+    - name: Debug Docker installation output
+      ansible.builtin.debug:
+        var: docker_install
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - git
+        state: present
+        update_cache: true
+      register: apt_result
+      retries: 5
+      delay: 30
+      until: apt_result is success
+      failed_when: >-
+        apt_result is failed and
+        'Could not get lock' not in apt_result.stderr
+
+    - name: Add Docker GPG key
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+        update_cache: true
+
+    - name: Install Docker components
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: "noninteractive"
+        APT_LISTCHANGES_FRONTEND: "none"
+        DEBCONF_NONINTERACTIVE_SEEN: "true"
+      register: docker_install
+      retries: 5
+      delay: 30
+      until: docker_install is success
+      failed_when: >-
+        docker_install is failed and
+        'Could not get lock' not in docker_install.stderr
+      vars:
+        ansible_debug: true
+      notify: Debug Docker installation output
+
+    - name: Enable and start Docker service
+      ansible.builtin.systemd:
+        name: docker.service
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Clone application repository
+      ansible.builtin.git:
+        repo: "https://github.com/aasimsyed/activist.git"
+        dest: "{{ project_dir }}"
+        version: main
+        force: true
+
+    - name: Install Node.js
+      ansible.builtin.apt:
+        name: nodejs
+        state: present
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: "noninteractive"
+
+    - name: Enable corepack
+      ansible.builtin.command:
+        cmd: corepack enable
+      changed_when: false
+
+    - name: Update apt and install Yarn
+      ansible.builtin.apt:
+        name: yarn
+        state: present
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: "noninteractive"
+
+    - name: Configure and verify Yarn
+      ansible.builtin.shell: |
+        cd {{ frontend_dir }} && yarn set version berry 2>&1
+        cd {{ frontend_dir }} && yarn install 2>&1
+        YARN_VERSION=$(yarn --version 2>&1)
+        echo "Installed Yarn version: $YARN_VERSION"
+        if [ "$YARN_VERSION" != "4.6.0" ]; then
+          echo "Error: Expected Yarn 4.6.0 but got $YARN_VERSION" >&2
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
+      register: yarn_setup
+      changed_when: false
+
+    - name: Install pip3
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+        update_cache: true
+    - name: Install Python dependencies
+      ansible.builtin.apt:
+        name:
+          - python3-venv
+          - python3-pip
+          - python3-full
+        state: present
+        update_cache: true
+    - name: Create Python virtual environment
+      ansible.builtin.command:
+        cmd: python3 -m venv venv
+        chdir: "{{ project_dir }}"
+        creates: "{{ project_dir }}/venv/bin/activate"
+    - name: Install Python dependencies
+      ansible.builtin.pip:
+        requirements: "{{ project_dir }}/backend/requirements-dev.txt"
+        virtualenv: "{{ project_dir }}/venv"
+        state: present
+    - name: Configure Yarn dependencies
+      ansible.builtin.command:
+        cmd: yarn install --immutable
+        chdir: "{{ frontend_dir }}"
+      environment:
+        YARN_ENABLE_INLINE_BUILDS: "1"
+        NODE_ENV: production
+      changed_when: false
+
+    - name: Configure backend port binding
+      ansible.builtin.lineinfile:
+        path: "{{ project_dir }}/docker-compose.yml"
+        regexp: '("${BACKEND_PORT}:${BACKEND_PORT}")'
+        line: '"0.0.0.0:\1"'
+        backrefs: true
+    - name: Configure frontend port binding
+      ansible.builtin.lineinfile:
+        path: "{{ project_dir }}/docker-compose.yml"
+        regexp: '("${FRONTEND_PORT}:${FRONTEND_PORT}")'
+        line: '"0.0.0.0:\1"'
+        backrefs: true
+    - name: Create .env file
+      ansible.builtin.copy:
+        dest: "{{ project_dir }}/.env"
+        mode: '0644'
+        content: |
+          BACKEND_PORT=8000
+          FRONTEND_PORT=3000
+          DATABASE_NAME=activist
+          DATABASE_USER=postgres
+          DATABASE_PASSWORD=postgres
+          DATABASE_HOST=db
+          DATABASE_PORT=5432
+          DJANGO_ALLOWED_HOSTS=*
+          DEBUG=True
+          SECRET_KEY=your-secret-key-here
+          VITE_FRONTEND_URL=http://localhost:3000
+    - name: Deploy backend and database first
+      community.docker.docker_compose_v2:
+        project_src: "{{ project_dir }}"
+        env_files:
+          - .env.dev
+        services:
+          - backend
+          - db
+        build: always
+        state: present
+    - name: Install frontend dependencies
+      community.docker.docker_container:
+        name: frontend-deps
+        image: node:20
+        command: bash -c "cd /app && yarn install"
+        volumes:
+          - "{{ frontend_dir }}:/app"
+        cleanup: true
+        detach: false
+
+    - name: Build frontend
+      community.docker.docker_container:
+        name: frontend-build
+        image: node:20
+        command: bash -c "cd /app && yarn build"
+        volumes:
+          - "{{ frontend_dir }}:/app"
+        cleanup: true
+        detach: false
+
+    - name: Deploy full application stack
+      community.docker.docker_compose_v2:
+        project_src: "{{ project_dir }}"
+        files:
+          - docker-compose.yml
+        state: present
+        pull: "always"
+        remove_orphans: true
+        build: "always"
+      register: compose_result
+      until: compose_result is success
+      retries: 3
+      delay: 10
+
+    - name: Install pyenv dependencies
+      ansible.builtin.apt:
+        name:
+          - make
+          - build-essential
+          - libssl-dev
+          - zlib1g-dev
+          - libbz2-dev
+          - libreadline-dev
+          - libsqlite3-dev
+          - wget
+          - curl
+          - llvm
+          - libncursesw5-dev
+          - xz-utils
+          - tk-dev
+          - libxml2-dev
+          - libxmlsec1-dev
+          - libffi-dev
+          - liblzma-dev
+        state: present
+    - name: Install pyenv
+      ansible.builtin.git:
+        repo: https://github.com/pyenv/pyenv.git
+        dest: ~/.pyenv
+        version: master
+    - name: Configure pyenv
+      ansible.builtin.shell: |
+        echo 'export PYENV_ROOT="$HOME/.pyenv"' >> ~/.bashrc
+        echo 'command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"' >> ~/.bashrc
+        echo 'eval "$(pyenv init -)"' >> ~/.bashrc
+        . ~/.bashrc
+        pyenv install 3.13.1
+        pyenv global 3.13.1
+      args:
+        executable: /bin/bash
+      environment:
+        PYENV_ROOT: "{{ ansible_env.HOME }}/.pyenv"
+        PATH: "{{ ansible_env.HOME }}/.pyenv/bin:{{ ansible_env.PATH }}"
+      register: pyenv_output
+      changed_when: false
+    - name: Debug pyenv output
+      ansible.builtin.debug:
+        var: pyenv_output
+    - name: Install system packages
+      ansible.builtin.apt:
+        name:
+          - python3-venv
+          - python3-pip
+          - python3-full
+          - nodejs
+          - make
+          - build-essential
+          - libssl-dev
+          - zlib1g-dev
+          - libbz2-dev
+          - libreadline-dev
+          - libsqlite3-dev
+          - wget
+          - curl
+          - llvm
+          - libncursesw5-dev
+          - xz-utils
+          - tk-dev
+          - libxml2-dev
+          - libxmlsec1-dev
+          - libffi-dev
+          - liblzma-dev
+        state: present
+        update_cache: true
+    - name: Build Docker images
+      community.docker.docker_compose_v2:
+        project_src: "{{ project_dir }}"
+        build: "always"
+      async: 600
+      poll: 5
