@@ -39,20 +39,43 @@ resource "digitalocean_droplet" "activist" {
     host        = self.ipv4_address
     private_key = file("~/.ssh/id_rsa")
   }
+
+  provisioner "local-exec" {
+    command = "while ! nc -z ${self.ipv4_address} 22; do sleep 1; done"
+  }
+}
+
+# Try to fetch existing domain
+data "digitalocean_domain" "existing_domain" {
+  name = "dev-asyed.com"
+  # Prevent errors if domain doesn't exist
+  depends_on = [digitalocean_domain.activist_domain]
 }
 
 # Create domain if it doesn't exist
 resource "digitalocean_domain" "activist_domain" {
   name = "dev-asyed.com"
+  # Only create if data source fails
+  count = data.digitalocean_domain.existing_domain.id == null ? 1 : 0
 }
 
-# DNS A record that points to the droplet
+# Use either existing or new domain
+locals {
+  domain_name = try(data.digitalocean_domain.existing_domain.name, digitalocean_domain.activist_domain[0].name)
+}
+
+# Update A record to use local variable
 resource "digitalocean_record" "activist_a_record" {
-  domain = digitalocean_domain.activist_domain.name
-  type   = "A"
-  name   = "activist"
-  value  = digitalocean_droplet.activist.ipv4_address
-  ttl    = 30
+  depends_on = [digitalocean_droplet.activist]
+  domain    = local.domain_name
+  type      = "A"
+  name      = "activist"
+  value     = digitalocean_droplet.activist.ipv4_address
+  ttl       = 30
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # SSH tunnel depends on Ansible completing the app deployment
@@ -122,8 +145,7 @@ resource "null_resource" "run_ansible" {
   depends_on = [digitalocean_droplet.activist]
 
   triggers = {
-    droplet_ip        = digitalocean_droplet.activist.ipv4_address
-    requirements_hash = filesha256("${path.module}/requirements.yml")
+    droplet_ip = digitalocean_droplet.activist.ipv4_address
   }
 
   provisioner "local-exec" {

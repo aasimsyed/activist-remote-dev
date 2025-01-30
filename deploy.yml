@@ -12,10 +12,21 @@
         var: docker_install
 
   tasks:
+    - name: Wait for APT locks to be released
+      ansible.builtin.shell: |
+        while lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || lsof /var/lib/apt/lists/lock >/dev/null 2>&1 || lsof /var/lib/dpkg/lock >/dev/null 2>&1; do
+          sleep 5
+        done
+      changed_when: false
+
     - name: Update apt cache
       ansible.builtin.apt:
         update_cache: true
         cache_valid_time: 3600
+      register: apt_update
+      retries: 5
+      delay: 30
+      until: apt_update is success
 
     - name: Install required packages
       ansible.builtin.apt:
@@ -32,9 +43,6 @@
       retries: 5
       delay: 30
       until: apt_result is success
-      failed_when: >-
-        apt_result is failed and
-        'Could not get lock' not in apt_result.stderr
 
     - name: Add Docker GPG key
       ansible.builtin.apt_key:
@@ -43,11 +51,18 @@
 
     - name: Add Docker repository
       ansible.builtin.apt_repository:
-        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu noble stable"
         state: present
         update_cache: true
 
-    - name: Install Docker components
+    - name: Wait for APT locks before Docker install
+      ansible.builtin.shell: |
+        while lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || lsof /var/lib/apt/lists/lock >/dev/null 2>&1 || lsof /var/lib/dpkg/lock >/dev/null 2>&1; do
+          sleep 5
+        done
+      changed_when: false
+
+    - name: Install Docker packages
       ansible.builtin.apt:
         name:
           - docker-ce
@@ -57,27 +72,26 @@
           - docker-compose-plugin
         state: present
         update_cache: true
-      environment:
-        DEBIAN_FRONTEND: "noninteractive"
-        APT_LISTCHANGES_FRONTEND: "none"
-        DEBCONF_NONINTERACTIVE_SEEN: "true"
       register: docker_install
       retries: 5
       delay: 30
       until: docker_install is success
-      failed_when: >-
-        docker_install is failed and
-        'Could not get lock' not in docker_install.stderr
-      vars:
-        ansible_debug: true
-      notify: Debug Docker installation output
+
+    - name: Wait for Docker to be installed
+      ansible.builtin.wait_for:
+        path: /usr/bin/docker
+        timeout: 60
 
     - name: Enable and start Docker service
       ansible.builtin.systemd:
-        name: docker.service
-        enabled: true
+        name: docker
         state: started
+        enabled: true
         daemon_reload: true
+      register: docker_service
+      retries: 3
+      delay: 10
+      until: docker_service is success
 
     - name: Clone application repository
       ansible.builtin.git:
@@ -86,6 +100,15 @@
         version: main
         force: true
 
+    - name: Setup Node.js repository
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+      args:
+        warn: false
+        executable: /bin/bash
+      changed_when: false
+
     - name: Install Node.js
       ansible.builtin.apt:
         name: nodejs
@@ -93,10 +116,32 @@
         update_cache: true
       environment:
         DEBIAN_FRONTEND: "noninteractive"
+      register: nodejs_install
+      retries: 3
+      delay: 10
+      until: nodejs_install is success
+
+    - name: Install npm
+      ansible.builtin.apt:
+        name: npm
+        state: present
+      register: npm_install
+      retries: 3
+      delay: 10
+      until: npm_install is success
+
+    - name: Install corepack globally
+      ansible.builtin.shell: |
+        npm install -g corepack
+      register: corepack_install
+      retries: 3
+      delay: 10
+      until: corepack_install is success
+      changed_when: false
 
     - name: Enable corepack
-      ansible.builtin.command:
-        cmd: corepack enable
+      ansible.builtin.shell: |
+        /usr/local/bin/corepack enable
       changed_when: false
 
     - name: Update apt and install Yarn
@@ -228,50 +273,6 @@
       retries: 3
       delay: 10
 
-    - name: Install pyenv dependencies
-      ansible.builtin.apt:
-        name:
-          - make
-          - build-essential
-          - libssl-dev
-          - zlib1g-dev
-          - libbz2-dev
-          - libreadline-dev
-          - libsqlite3-dev
-          - wget
-          - curl
-          - llvm
-          - libncursesw5-dev
-          - xz-utils
-          - tk-dev
-          - libxml2-dev
-          - libxmlsec1-dev
-          - libffi-dev
-          - liblzma-dev
-        state: present
-    - name: Install pyenv
-      ansible.builtin.git:
-        repo: https://github.com/pyenv/pyenv.git
-        dest: ~/.pyenv
-        version: master
-    - name: Configure pyenv
-      ansible.builtin.shell: |
-        echo 'export PYENV_ROOT="$HOME/.pyenv"' >> ~/.bashrc
-        echo 'command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"' >> ~/.bashrc
-        echo 'eval "$(pyenv init -)"' >> ~/.bashrc
-        . ~/.bashrc
-        pyenv install 3.13.1
-        pyenv global 3.13.1
-      args:
-        executable: /bin/bash
-      environment:
-        PYENV_ROOT: "{{ ansible_env.HOME }}/.pyenv"
-        PATH: "{{ ansible_env.HOME }}/.pyenv/bin:{{ ansible_env.PATH }}"
-      register: pyenv_output
-      changed_when: false
-    - name: Debug pyenv output
-      ansible.builtin.debug:
-        var: pyenv_output
     - name: Install system packages
       ansible.builtin.apt:
         name:
