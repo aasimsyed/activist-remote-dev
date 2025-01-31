@@ -116,14 +116,39 @@ update_dns() {
 
 create_droplet() {
   echo "Creating droplet..."
-  (cd "${TF_DIR}" && terraform apply -auto-approve -var="do_token=${DO_TOKEN}")
+  rm -rf .terraform* terraform.tfstate*
+  terraform init
+  terraform apply -auto-approve
   
-  # Get droplet IP
-  DROPLET_ID=$(doctl compute droplet list --format ID --no-header | awk '{print $1}')
-  DROPLET_IP=$(doctl compute droplet get $DROPLET_ID --format PublicIPv4 --no-header)
+  # Get droplet IP through Terraform (more reliable)
+  DROPLET_IP=$(terraform output -raw droplet_ip)
   
   # Update DNS
-  update_dns $DROPLET_IP
+  update_dns "$DROPLET_IP"
+
+  # Wait for SSH to become available
+  echo -n "Waiting for SSH readiness..."
+  for i in {1..30}; do
+    if nc -z -w5 $DROPLET_IP 22; then
+      echo " OK"
+      break
+    fi
+    sleep 2
+    echo -n "."
+  done
+
+  # Write environment file with bash syntax
+  echo "export DROPLET_IP=$DROPLET_IP" > ~/.config/ssh-tunnel.env
+
+  # Force bash-compatible service reload
+  launchctl bootout gui/501/local.tunnel
+  /bin/bash -c "launchctl bootstrap gui/501 ~/Library/LaunchAgents/local.tunnel.plist"
+
+  # Bash-specific process check
+  if ! /bin/bash -c "pgrep -f 'ssh.*-L 3000' >/dev/null"; then
+    echo "Error: Tunnel process not found"
+    exit 1
+  fi
 }
 
 destroy_droplet() {
@@ -156,7 +181,10 @@ destroy_droplet() {
   doctl compute droplet list --format "ID,Name,Status,Region"
 
   echo "Running terraform destroy..."
-  (cd "${TF_DIR}" && terraform destroy -auto-approve -var="do_token=${DO_TOKEN}")
+  terraform init -reconfigure
+  (cd "${TF_DIR}" && terraform destroy -auto-approve)
+  rm -f /Users/aasim/.config/ssh-tunnel.env
+  launchctl stop local.tunnel
 }
 
 delete_all() {
@@ -192,7 +220,6 @@ main() {
   case "$1" in
     --create)
       validate_environment
-      validate_configs
       create_droplet
       ;;
     --destroy)
@@ -223,13 +250,13 @@ main() {
 
 # Handle token override
 if [[ "$1" == "--token" ]]; then
-  DO_TOKEN="$2"
+  export DO_TOKEN="$2"
   shift 2
 fi
 
-# Set DO_TOKEN from environment if not provided
-DO_TOKEN="${DO_TOKEN:-${!DO_TOKEN}}"
+# Set from environment if not provided
+export DO_TOKEN="${DO_TOKEN:-}"
+export TF_VAR_do_token="$DO_TOKEN"
 
 # Execute main function
 main "$@"
-

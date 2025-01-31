@@ -4,3 +4,9 @@ variable "do_token" {
   sensitive   = true
 }
 
+variable "domain_exists" {
+  description = "Set to true if domain already exists in DigitalOcean"
+  type        = bool
+  default     = true
+}
+

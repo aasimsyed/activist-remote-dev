@@ -52,7 +52,7 @@ for i in $(seq 1 $max_retries); do
   echo -e "\n${BLUE}Attempt ${CYAN}$i/$max_retries${BLUE} - ${PURPLE}$(date)${NC}"
   ANSIBLE_FORCE_COLOR=true \
   ANSIBLE_HOST_KEY_CHECKING=False \
-  ansible-playbook -i inventory.ini deploy.yml && \
+  ansible-playbook -i "$DROPLET_IP," deploy.yml && \
     echo -e "${GREEN}Deployment successful!${NC}" && exit 0
   
   echo -e "${RED}Attempt $i failed.${NC} ${YELLOW}Retrying in $delay seconds...${NC}"

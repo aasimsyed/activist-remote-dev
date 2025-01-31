@@ -7,7 +7,7 @@ terraform {
     }
   }
   backend "local" {
-    lock_timeout = "5m"
+    # Remove invalid lock_timeout parameter
   }
 }
 
@@ -24,7 +24,7 @@ data "digitalocean_ssh_key" "my_key" {
 }
 
 resource "digitalocean_droplet" "activist" {
-  name       = "activist-docker-nyc-2"
+  name       = "activist-docker-nyc-${formatdate("YYYYMMDD-hhmmss", timestamp())}"
   size       = "s-4vcpu-16gb-amd"
   region     = "nyc2"
   image      = "ubuntu-24-04-x64"
@@ -33,35 +33,37 @@ resource "digitalocean_droplet" "activist" {
   monitoring = true
   ssh_keys   = [data.digitalocean_ssh_key.my_key.id]
 
-  # Wait for droplet to be active and have an IP
-  provisioner "local-exec" {
-    command = <<-EOT
-      until IP=$(doctl compute droplet get ${self.id} --format PublicIPv4 --no-header); do
-        echo "Waiting for droplet IP..."
-        sleep 5
-      done
-      echo "Droplet IP: $IP"
-    EOT
+  lifecycle {
+    prevent_destroy = false  # Explicitly allow destruction
+    ignore_changes = [tags]  # Prevent conflicts with external changes
   }
 }
 
-# Create domain (will fail silently if exists)
+# Use existing domain or create new one
 resource "digitalocean_domain" "activist_domain" {
   name = "dev-asyed.com"
   lifecycle {
     ignore_changes = [name]
+    # Allow domain to be deleted/recreated if not pre-existing
+    prevent_destroy = false
   }
+  # Only create if domain doesn't exist (prevents 422 error)
+  count = var.domain_exists ? 0 : 1
+}
+
+# Get existing domain data
+data "digitalocean_domain" "existing_domain" {
+  name = "dev-asyed.com"
+  depends_on = [digitalocean_domain.activist_domain]
 }
 
 # DNS A record that points to the droplet
 resource "digitalocean_record" "activist_a_record" {
-  depends_on = [digitalocean_droplet.activist, digitalocean_domain.activist_domain]
-  domain     = digitalocean_domain.activist_domain.name
-  type       = "A"
-  name       = "activist"
-  value      = digitalocean_droplet.activist.ipv4_address
-  ttl        = 30
-
+  domain   = try(digitalocean_domain.activist_domain[0].name, data.digitalocean_domain.existing_domain.name)
+  type     = "A"
+  name     = "activist"
+  value    = digitalocean_droplet.activist.ipv4_address
+  ttl      = 30
   lifecycle {
     create_before_destroy = true
   }
@@ -127,7 +129,8 @@ resource "null_resource" "run_ansible" {
         echo "Error: Empty droplet IP"
         exit 1
       fi
-      ANSIBLE_FORCE_COLOR=true bash run_ansible.sh "$${DROPLET_IP}"
+      sleep 10  # Extra buffer after SSH connection
+      ANSIBLE_FORCE_COLOR=true ansible-playbook -u root -i "$DROPLET_IP," --private-key ~/.ssh/id_rsa deploy.yml
     EOT
   }
 }
@@ -135,20 +138,4 @@ resource "null_resource" "run_ansible" {
 # Output the consistent FQDN
 output "droplet_fqdn" {
   value = digitalocean_record.activist_a_record.fqdn
-}
-
-# SSH tunnel depends on Ansible completing the app deployment
-resource "null_resource" "ansible_provisioner" {
-  triggers = {
-    droplet_ip = digitalocean_droplet.activist.ipv4_address
-  }
-
-  provisioner "local-exec" {
-    command = "ANSIBLE_FORCE_COLOR=1 ansible-playbook -u root -i '${digitalocean_droplet.activist.ipv4_address},' ansible/main.yml"
-  }
-
-  depends_on = [
-    digitalocean_droplet.activist,
-    null_resource.run_ansible
-  ]
 }
