@@ -12,6 +12,7 @@ inventory.ini
 # Python
 __pycache__/
 *.py[cod]
+.venv/
 venv/
 .python-version
 
