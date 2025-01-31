@@ -44,35 +44,35 @@ variable "delete_all" {
   default = false
 }
 
-variable "create_domain" {
+variable "manage_domain" {
   type    = bool
-  default = true  # Set default based on your needs
+  default = true
 }
 
-# Try to fetch existing domain (will fail if not found)
-data "digitalocean_domain" "existing" {
-  count = var.manage_domain ? 0 : 1  # Only fetch when not managing domain
-  name  = "dev-asyed.com"
-}
-
-# Create domain only when we're managing it and it doesn't exist
+# Domain configuration with error handling
 resource "digitalocean_domain" "main" {
   count      = var.manage_domain ? 1 : 0
   name       = "dev-asyed.com"
   ip_address = digitalocean_droplet.activist.ipv4_address
 
   lifecycle {
-    prevent_destroy = false  # Allow domain deletion with delete-all
+    prevent_destroy = false
+    ignore_changes  = [ip_address]
   }
 }
 
-# Always create/update the A record using either existing or new domain
+# DNS A record with error handling
 resource "digitalocean_record" "activist_a_record" {
-  domain = try(data.digitalocean_domain.existing[0].name, digitalocean_domain.main[0].name)
+  count  = var.manage_domain ? 1 : 0
+  domain = try(digitalocean_domain.main[0].name, "dev-asyed.com")
   type   = "A"
   name   = "activist"
   value  = digitalocean_droplet.activist.ipv4_address
   ttl    = 30
+
+  lifecycle {
+    ignore_changes = [value]
+  }
 }
 
 # Add IP check and SSH wait as separate resource
@@ -131,17 +131,13 @@ resource "null_resource" "run_ansible" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       DROPLET_IP="${digitalocean_droplet.activist.ipv4_address}"
-      if [ -z "$${DROPLET_IP}" ]; then
-        echo "Error: Empty droplet IP"
-        exit 1
-      fi
-      sleep 10  # Extra buffer after SSH connection
+      export DROPLET_IP
       ANSIBLE_FORCE_COLOR=true ansible-playbook -u root -i "$DROPLET_IP," --private-key ~/.ssh/id_rsa deploy.yml
     EOT
   }
 }
 
-# Update the output to use the existing domain
+# Update output to handle both managed and unmanaged domains
 output "droplet_fqdn" {
-  value = digitalocean_record.activist_a_record.fqdn
+  value = var.manage_domain ? try(digitalocean_record.activist_a_record[0].fqdn, null) : "activist.dev-asyed.com"
 }

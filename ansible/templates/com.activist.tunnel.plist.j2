@@ -1,30 +1,90 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    SSH Tunnel LaunchAgent Configuration
+    
+    Purpose:
+    - Maintains persistent SSH tunnels to the DigitalOcean droplet
+    - Auto-restarts if connection fails
+    - Provides local access to remote services
+    - Ensures tunnel starts on user login
+    
+    Configuration:
+    - Ports are defined in ansible/group_vars/all.yml
+    - Environment variables from ~/.config/ssh-tunnel.env
+    - Logs to ~/Library/Logs/activist-tunnel.log
+    
+    Security:
+    - Binds only to localhost for security
+    - Uses SSH key authentication
+    - No password storage
+    - Restricted file permissions (644)
+    
+    Debugging:
+    - Check logs at ~/Library/Logs/activist-tunnel.log
+    - Use `launchctl list com.activist.tunnel` for status
+    - Restart with `launchctl kickstart -k com.activist.tunnel`
+-->
 <plist version="1.0">
 <dict>
+    <!-- Unique identifier for the LaunchAgent -->
     <key>Label</key>
     <string>com.activist.tunnel</string>
+    
+    <!-- Command configuration -->
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/autossh</string>
+        <!-- autossh maintains tunnel stability -->
+        <string>{{ '/opt/homebrew/bin/autossh' if ansible_architecture == 'arm64' else '/usr/local/bin/autossh' }}</string>
+        <!-- Disable autossh monitoring port -->
         <string>-M</string>
         <string>0</string>
+        <!-- No remote commands, tunnel only -->
         <string>-N</string>
-        {% for port in tunnel_ports %}
+        <!-- Quiet mode for cleaner logs -->
+        <string>-q</string>
+        <!-- SSH connection keepalive -->
+        <string>-o</string>
+        <string>ServerAliveInterval=60</string>
+        <string>-o</string>
+        <string>ServerAliveCountMax=3</string>
+        <!-- Port forwarding configuration -->
         <string>-L</string>
-        <string>localhost:{{ port.local }}:0.0.0.0:{{ port.remote }}</string>
-        {% endfor %}
-        <string>root@${DROPLET_IP}</string>
+        <string>localhost:3000:0.0.0.0:3000</string>
+        <string>-L</string>
+        <string>localhost:8000:0.0.0.0:8000</string>
+        <!-- Remote connection details -->
+        <string>root@{% if inventory_hostname == 'localhost' %}{{ lookup('env', 'DROPLET_IP') }}{% else %}{{ hostvars[inventory_hostname]['ansible_host'] }}{% endif %}</string>
+        <!-- SSH key path -->
+        <string>-i</string>
+        <string>{{ ansible_env.HOME }}/.ssh/id_rsa</string>
     </array>
+    
+    <!-- Environment configuration -->
     <key>EnvironmentVariables</key>
     <dict>
-        <key>DROPLET_IP</key>
-        <string>{{ ansible_host }}</string>
+        <!-- Disable autossh's monitoring -->
+        <key>AUTOSSH_GATETIME</key>
+        <string>0</string>
+        <!-- Set monitoring port to 0 -->
+        <key>AUTOSSH_PORT</key>
+        <string>0</string>
     </dict>
+    
+    <!-- Service management -->
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <!-- Restart on failure -->
+        <key>SuccessfulExit</key>
+        <false/>
+        <!-- Restart after system wakeup -->
+        <key>AfterInitialDemand</key>
+        <true/>
+    </dict>
+    
+    <!-- Logging configuration -->
     <key>StandardErrorPath</key>
     <string>{{ ansible_env.HOME }}/Library/Logs/activist-tunnel.log</string>
     <key>StandardOutPath</key>

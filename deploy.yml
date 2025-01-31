@@ -1,10 +1,27 @@
 ---
+# Activist Application Deployment Playbook
+#
+# Purpose:
+# - Automates the complete setup of development environment
+# - Configures SSH tunneling for local development
+# - Installs and configures all required dependencies
+#
+# Requirements:
+# - macOS or Linux target system
+# - Ansible 2.18+
+# - community.general collection
+# - Root access on target system
+#
+# Usage:
+# ansible-playbook -i inventory deploy.yml
+
 - name: Deploy Activist Application
   hosts: all
   vars:
-    project_dir: "/root/activist"
+    # Set project directory based on host
+    project_dir: "{{ '/root/activist' if inventory_hostname != 'localhost' else ansible_env.HOME + '/activist' }}"
     frontend_dir: "{{ project_dir }}/frontend"
-  become: true
+  become: false
 
   handlers:
     - name: Debug Docker installation output
@@ -19,12 +36,14 @@
         daemon_reload: true
 
   tasks:
+    # Linux-specific system preparation
     - name: Wait for APT locks to be released
       ansible.builtin.shell: |
         while lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || lsof /var/lib/apt/lists/lock >/dev/null 2>&1 || lsof /var/lib/dpkg/lock >/dev/null 2>&1; do
           sleep 5
         done
       changed_when: false
+      when: ansible_system != 'Darwin'
 
     - name: Update apt cache
       ansible.builtin.apt:
@@ -34,34 +53,33 @@
       retries: 5
       delay: 30
       until: apt_update is success
+      when: ansible_system != 'Darwin'
 
     - name: Install required packages
       ansible.builtin.apt:
         name:
+          - git
+          - curl
+          - wget
+          - gnupg2
+          - software-properties-common
           - apt-transport-https
           - ca-certificates
-          - curl
-          - gnupg
-          - lsb-release
-          - git
-          - python3-venv
         state: present
-        update_cache: true
-      register: apt_result
-      retries: 5
-      delay: 30
-      until: apt_result is success
+      when: ansible_system != 'Darwin'
 
     - name: Add Docker GPG key
       ansible.builtin.apt_key:
         url: https://download.docker.com/linux/ubuntu/gpg
         state: present
+      when: ansible_system != 'Darwin'  # Skip on macOS
 
     - name: Add Docker repository
       ansible.builtin.apt_repository:
         repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu noble stable"
         state: present
         update_cache: true
+      when: ansible_system != 'Darwin'  # Skip on macOS
 
     - name: Wait for APT locks before Docker install
       ansible.builtin.shell: |
@@ -69,8 +87,9 @@
           sleep 5
         done
       changed_when: false
+      when: ansible_system != 'Darwin'  # Skip on macOS
 
-    - name: Install Docker packages
+    - name: Install Docker packages (Linux)
       ansible.builtin.apt:
         name:
           - docker-ce
@@ -84,22 +103,22 @@
       retries: 5
       delay: 30
       until: docker_install is success
+      when: ansible_system != 'Darwin'  # Skip on macOS
 
     - name: Wait for Docker to be installed
       ansible.builtin.wait_for:
         path: /usr/bin/docker
         timeout: 60
+      when: ansible_system != 'Darwin'  # Skip on macOS
 
-    - name: Enable and start Docker service
+    - name: Enable and start Docker service (Linux)
       ansible.builtin.systemd:
         name: docker
         state: started
         enabled: true
         daemon_reload: true
       register: docker_service
-      retries: 3
-      delay: 10
-      until: docker_service is success
+      when: ansible_system != 'Darwin'  # Skip on macOS
 
     - name: Clone application repository
       ansible.builtin.git:
@@ -107,20 +126,23 @@
         dest: "{{ project_dir }}"
         version: main
         force: true
-
-    - name: Setup Node.js repository
+      when: ansible_system != 'Darwin'  # Skip on macOS
+    # Node.js installation for Linux
+    - name: Setup Node.js repository (Linux)
       ansible.builtin.uri:
         url: https://deb.nodesource.com/setup_20.x
         return_content: true
       register: node_setup
+      when: ansible_system != 'Darwin'
 
-    - name: Execute Node.js setup script
+    - name: Execute Node.js setup script (Linux)
       ansible.builtin.shell: "{{ node_setup.content }}"
       args:
         executable: /bin/bash
       changed_when: false
+      when: ansible_system != 'Darwin'
 
-    - name: Install Node.js
+    - name: Install Node.js (Linux)
       ansible.builtin.apt:
         name: nodejs
         state: present
@@ -131,11 +153,13 @@
       retries: 3
       delay: 10
       until: nodejs_install is success
+      when: ansible_system != 'Darwin'
 
     - name: Update npm to latest version
       ansible.builtin.shell: |
         npm install -g npm@latest
       changed_when: false
+      when: ansible_system != 'Darwin'  # Skip on macOS
 
     - name: Clean up existing Yarn installations
       become: true
@@ -160,6 +184,7 @@
       changed_when: "'already enabled' not in corepack_setup.stdout"
       async: 300
       poll: 5
+      when: ansible_system != 'Darwin'  # Skip on macOS
 
     - name: Set project Yarn version
       ansible.builtin.shell: |
@@ -170,6 +195,7 @@
       environment:
         PATH: "/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
       changed_when: false
+      when: inventory_hostname != 'localhost'
 
     - name: Pre-cache Yarn dependencies
       ansible.builtin.shell: |
@@ -182,6 +208,7 @@
       environment:
         PATH: "{{ ansible_env.HOME }}/.yarn/bin:/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
       changed_when: false
+      when: inventory_hostname != 'localhost'
 
     - name: Configure Yarn for non-interactive install
       ansible.builtin.shell: |
@@ -194,6 +221,7 @@
       environment:
         PATH: "{{ ansible_env.HOME }}/.yarn/bin:/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
       changed_when: false
+      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Install dependencies with enforced timeout
       ansible.builtin.shell: |
@@ -213,6 +241,7 @@
       delay: 300
       until: yarn_install is success
       changed_when: false
+      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Migrate to Yarn Berry and install
       ansible.builtin.shell: |
@@ -229,6 +258,7 @@
       retries: 2
       until: yarn_migration is success
       changed_when: false
+      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Verify async job completion
       ansible.builtin.async_status:
@@ -238,16 +268,21 @@
       retries: 30
       delay: 30
       ignore_errors: true  # Continue even if job disappeared
+      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Validate async job ID
       ansible.builtin.debug:
         msg: "Yarn job ID: {{ yarn_migration.ansible_job_id }}"
-      when: yarn_migration is defined
+      when:
+        - yarn_migration is defined
+        - inventory_hostname != 'localhost'
 
     - name: Check async status
       ansible.builtin.debug:
         var: yarn_job_result
-      when: yarn_job_result is defined
+      when:
+        - yarn_job_result is defined
+        - inventory_hostname != 'localhost'
 
     - name: Flush handlers
       ansible.builtin.meta: flush_handlers
@@ -257,12 +292,14 @@
         cmd: python3 -m venv venv
         chdir: "{{ project_dir }}"
         creates: "{{ project_dir }}/venv/bin/activate"
+      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Install Python dependencies
       ansible.builtin.pip:
         requirements: "{{ project_dir }}/backend/requirements-dev.txt"
         virtualenv: "{{ project_dir }}/venv"
         state: present
+      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Configure backend port binding
       ansible.builtin.lineinfile:
@@ -270,6 +307,7 @@
         regexp: '("${BACKEND_PORT}:${BACKEND_PORT}")'
         line: '"0.0.0.0:\1"'
         backrefs: true
+      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Configure frontend port binding
       ansible.builtin.lineinfile:
@@ -277,6 +315,7 @@
         regexp: '("${FRONTEND_PORT}:${FRONTEND_PORT}")'
         line: '"0.0.0.0:\1"'
         backrefs: true
+      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Deploy backend and database first
       community.docker.docker_compose_v2:
@@ -288,6 +327,7 @@
           - db
         build: always
         state: present
+      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Deploy full application stack
       community.docker.docker_compose_v2:
@@ -304,19 +344,47 @@
       until: compose_result is success
       retries: 3
       delay: 10
+      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Create SSH tunnel environment file
       ansible.builtin.template:
-        src: ssh-tunnel.env.j2
+        src: ansible/ssh-tunnel.env.j2
         dest: /etc/ssh-tunnel.env
         mode: '0600'
       when: ansible_system != 'Darwin'  # Skip on macOS
 
     - name: Create SSH tunnel environment file (macOS)
       ansible.builtin.template:
-        src: ssh-tunnel.env.j2
+        src: ansible/templates/ssh-tunnel.env.j2
         dest: "{{ ansible_env.HOME }}/.config/ssh-tunnel.env"
         mode: '0600'
+      when: ansible_system == 'Darwin'
+
+    - name: Ensure ~/.config directory exists
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.config"
+        state: directory
+        mode: '0755'
+      when: ansible_system == 'Darwin'
+
+    - name: Configure SSH tunnel LaunchDaemon (macOS)
+      ansible.builtin.template:
+        src: ansible/templates/com.activist.tunnel.plist.j2
+        dest: "{{ ansible_env.HOME }}/Library/LaunchAgents/com.activist.tunnel.plist"
+        mode: '0644'
+        owner: "{{ ansible_user_id }}"
+        group: "staff"
+      when: ansible_system == 'Darwin'
+
+    - name: Unload existing SSH tunnel LaunchAgent (macOS)
+      ansible.builtin.command: launchctl unload ~/Library/LaunchAgents/com.activist.tunnel.plist
+      failed_when: false
+      changed_when: false  # Indicates this task never reports changes
+      when: ansible_system == 'Darwin'
+
+    - name: Load SSH tunnel LaunchAgent (macOS)
+      ansible.builtin.command: launchctl load -w ~/Library/LaunchAgents/com.activist.tunnel.plist
+      changed_when: false
       when: ansible_system == 'Darwin'
 
     - name: Install autossh (Linux)
@@ -327,21 +395,14 @@
       when: ansible_system != 'Darwin'
 
     - name: Install autossh (macOS)
-      community.general.homebrew:
-        name: autossh
-        state: present
+      ansible.builtin.shell: |
+        if [ -d "/opt/homebrew" ]; then
+          # M1/M2 Mac
+          /opt/homebrew/bin/brew install autossh
+        else
+          # Intel Mac
+          /usr/local/bin/brew install autossh
+        fi
+      args:
+        creates: "{{ '/opt/homebrew/bin/autossh' if ansible_architecture == 'arm64' else '/usr/local/bin/autossh' }}"
       when: ansible_system == 'Darwin'
-
-    - name: Configure SSH tunnel LaunchDaemon (macOS)
-      ansible.builtin.template:
-        src: com.activist.tunnel.plist.j2
-        dest: ~/Library/LaunchAgents/com.activist.tunnel.plist
-        mode: '0644'
-        owner: "{{ ansible_user_id }}"
-        group: "staff"
-      when: ansible_system == 'Darwin'
-
-    - name: Load SSH tunnel LaunchDaemon (macOS)
-      ansible.builtin.command: launchctl load ~/Library/LaunchAgents/com.activist.tunnel.plist
-      when: ansible_system == 'Darwin'
-      changed_when: false

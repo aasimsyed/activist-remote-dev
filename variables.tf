@@ -10,9 +10,5 @@ variable "domain_exists" {
   default     = true
 }
 
-variable "manage_domain" {
-  type    = bool
-  default = false  # Default to using existing domain
-  description = "Set to true to create/manage domain, false to use existing"
-}
+# Removed duplicate manage_domain variable since it's now in main.tf
 

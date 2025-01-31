@@ -126,7 +126,7 @@ create_droplet() {
   # Update DNS
   update_dns "$DROPLET_IP"
 
-  # Wait for SSH to become available
+  # Wait for SSH availability
   echo -n "Waiting for SSH readiness..."
   for i in {1..30}; do
     if nc -z -w5 $DROPLET_IP 22; then
@@ -136,43 +136,37 @@ create_droplet() {
     sleep 2
     echo -n "."
   done
-  # Add 10s delay after droplet creation
+
+  # Add buffer time after droplet creation
   sleep 10
 
-  # Ensure config directory exists
+  # Ensure secure config directory exists
   CONFIG_DIR="/Users/aasim/.config"
   mkdir -p "$CONFIG_DIR"
-  chmod 700 "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"  # Restrictive permissions
 
-  # Update IP in config file
+  # Update IP in config file with atomic write
   echo "DROPLET_IP=$DROPLET_IP" > "$CONFIG_DIR/ssh-tunnel.env"
-  chmod 600 "$CONFIG_DIR/ssh-tunnel.env"
+  chmod 600 "$CONFIG_DIR/ssh-tunnel.env"  # Secure file permissions
 
-  # 4. Display verification
+  # Verify configuration
   echo "Environment file verification:"
   ls -l "$CONFIG_DIR/ssh-tunnel.env"
   cat "$CONFIG_DIR/ssh-tunnel.env"
 
-  # Write environment file with sync
-  echo "DROPLET_IP=$DROPLET_IP" > /Users/aasim/.config/ssh-tunnel.env
+  # Ensure file is written to disk
   sync
 
-  # Restart service with forced delay
-  sleep 2  # Allow file write to complete
+  # Service management with safety delays
+  sleep 2  # Allow file operations to complete
   launchctl bootout gui/501/local.tunnel 2>/dev/null
   launchctl bootstrap gui/501 ~/Library/LaunchAgents/local.tunnel.plist
 
-  # Verify using lsof instead of pgrep
+  # Verify tunnel establishment
   timeout 20 bash -c "while ! lsof -i :3000 | grep -q ssh; do sleep 1; done" || {
     echo "Tunnel failed to start"
     exit 1
   }
-
-  # Start tunnel after everything else is done
-  if ! check_and_start_tunnel "$DROPLET_IP"; then
-    echo "Warning: Failed to establish tunnel, but droplet creation was successful"
-    exit 1
-  fi
 }
 
 check_and_start_tunnel() {

@@ -1,5 +1,7 @@
 #!/bin/bash
-DROPLET_IP=$1
+# Get the droplet IP (either from argument or doctl)
+DROPLET_IP=${1:-$(doctl compute droplet list --format PublicIPv4 --no-header)}
+export DROPLET_IP
 
 # Color codes
 RED='\033[0;31m'
@@ -13,6 +15,9 @@ NC='\033[0m' # No Color
 echo -e "${BLUE}Starting Ansible provisioning for ${CYAN}$DROPLET_IP${NC}"
 echo -e "${BLUE}--------------------------------------------${NC}"
 echo -e "${PURPLE}$(date)${NC}"
+
+# Verify the variable
+echo -e "${GREEN}Using DROPLET_IP=$DROPLET_IP${NC}"
 
 # Add timeout for SSH check
 echo -e "${YELLOW}Waiting for SSH to become available...${NC}"
@@ -61,4 +66,9 @@ done
 
 echo -e "${RED}All attempts failed. Exiting.${NC}"
 exit 1
+
+# Run Ansible with the environment variable
+ANSIBLE_FORCE_COLOR=true \
+ANSIBLE_HOST_KEY_CHECKING=False \
+ansible-playbook -i inventory.ini deploy.yml
 

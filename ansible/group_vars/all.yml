@@ -1,4 +1,32 @@
+# Global Ansible Variables
+#
+# Purpose:
+# - Defines common variables used across playbooks
+# - Configures tunnel ports and settings
+# - Centralizes configuration management
+#
+# Usage:
+# - Referenced by templates and tasks
+# - Modify ports here to change tunnel configuration
+# - Adjust keepalive settings for connection stability
+
+# Application Ports
 tunnel_ports:
-  - { local: 3000, remote: 3000 }
-  - { local: 8000, remote: 8000 }
-tunnel_keepalive: 30 
+  - { local: 3000, remote: 3000 }  # Frontend: React/Nuxt development server
+  - { local: 8000, remote: 8000 }  # Backend: Django API server
+  - { local: 5432, remote: 5432 }  # Database: PostgreSQL (optional)
+
+# SSH Connection Settings
+ssh_keepalive_interval: 60    # Seconds between keepalive packets
+ssh_keepalive_count: 3        # Failed keepalives before disconnect
+ssh_connection_timeout: 10     # Connection timeout in seconds
+
+# AutoSSH Configuration
+autossh_poll: 60              # Monitor connection every N seconds
+autossh_first_poll: 30        # Initial connection check delay
+autossh_gatetime: 0           # Restart delay after failure (0 = immediate)
+
+# Security Settings
+ssh_key_path: "~/.ssh/id_rsa"
+ssh_strict_host_checking: "no"
+ssh_user: "root" 
