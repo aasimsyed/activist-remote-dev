@@ -1,1 +1,4 @@
- 
+tunnel_ports:
+  - { local: 3000, remote: 3000 }
+  - { local: 8000, remote: 8000 }
+tunnel_keepalive: 30 
