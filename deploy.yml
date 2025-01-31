@@ -14,6 +14,9 @@
       ansible.builtin.debug:
         var: yarn_migration
       when: false
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
 
   tasks:
     - name: Wait for APT locks to be released
@@ -301,3 +304,44 @@
       until: compose_result is success
       retries: 3
       delay: 10
+
+    - name: Create SSH tunnel environment file
+      ansible.builtin.template:
+        src: ssh-tunnel.env.j2
+        dest: /etc/ssh-tunnel.env
+        mode: '0600'
+      when: ansible_system != 'Darwin'  # Skip on macOS
+
+    - name: Create SSH tunnel environment file (macOS)
+      ansible.builtin.template:
+        src: ssh-tunnel.env.j2
+        dest: "{{ ansible_env.HOME }}/.config/ssh-tunnel.env"
+        mode: '0600'
+      when: ansible_system == 'Darwin'
+
+    - name: Install autossh (Linux)
+      ansible.builtin.apt:
+        name: autossh
+        state: present
+        update_cache: true
+      when: ansible_system != 'Darwin'
+
+    - name: Install autossh (macOS)
+      community.general.homebrew:
+        name: autossh
+        state: present
+      when: ansible_system == 'Darwin'
+
+    - name: Configure SSH tunnel LaunchDaemon (macOS)
+      ansible.builtin.template:
+        src: com.activist.tunnel.plist.j2
+        dest: ~/Library/LaunchAgents/com.activist.tunnel.plist
+        mode: '0644'
+        owner: "{{ ansible_user_id }}"
+        group: "staff"
+      when: ansible_system == 'Darwin'
+
+    - name: Load SSH tunnel LaunchDaemon (macOS)
+      ansible.builtin.command: launchctl load ~/Library/LaunchAgents/com.activist.tunnel.plist
+      when: ansible_system == 'Darwin'
+      changed_when: false

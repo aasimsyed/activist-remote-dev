@@ -39,34 +39,40 @@ resource "digitalocean_droplet" "activist" {
   }
 }
 
-# Use existing domain or create new one
-resource "digitalocean_domain" "activist_domain" {
-  name = "dev-asyed.com"
+variable "delete_all" {
+  type    = bool
+  default = false
+}
+
+variable "create_domain" {
+  type    = bool
+  default = true  # Set default based on your needs
+}
+
+# Try to fetch existing domain (will fail if not found)
+data "digitalocean_domain" "existing" {
+  count = var.manage_domain ? 0 : 1  # Only fetch when not managing domain
+  name  = "dev-asyed.com"
+}
+
+# Create domain only when we're managing it and it doesn't exist
+resource "digitalocean_domain" "main" {
+  count      = var.manage_domain ? 1 : 0
+  name       = "dev-asyed.com"
+  ip_address = digitalocean_droplet.activist.ipv4_address
+
   lifecycle {
-    ignore_changes = [name]
-    # Allow domain to be deleted/recreated if not pre-existing
-    prevent_destroy = false
+    prevent_destroy = false  # Allow domain deletion with delete-all
   }
-  # Only create if domain doesn't exist (prevents 422 error)
-  count = var.domain_exists ? 0 : 1
 }
 
-# Get existing domain data
-data "digitalocean_domain" "existing_domain" {
-  name = "dev-asyed.com"
-  depends_on = [digitalocean_domain.activist_domain]
-}
-
-# DNS A record that points to the droplet
+# Always create/update the A record using either existing or new domain
 resource "digitalocean_record" "activist_a_record" {
-  domain   = try(digitalocean_domain.activist_domain[0].name, data.digitalocean_domain.existing_domain.name)
-  type     = "A"
-  name     = "activist"
-  value    = digitalocean_droplet.activist.ipv4_address
-  ttl      = 30
-  lifecycle {
-    create_before_destroy = true
-  }
+  domain = try(data.digitalocean_domain.existing[0].name, digitalocean_domain.main[0].name)
+  type   = "A"
+  name   = "activist"
+  value  = digitalocean_droplet.activist.ipv4_address
+  ttl    = 30
 }
 
 # Add IP check and SSH wait as separate resource
@@ -135,7 +141,7 @@ resource "null_resource" "run_ansible" {
   }
 }
 
-# Output the consistent FQDN
+# Update the output to use the existing domain
 output "droplet_fqdn" {
   value = digitalocean_record.activist_a_record.fqdn
 }

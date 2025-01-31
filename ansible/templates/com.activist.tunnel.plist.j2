@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.activist.tunnel</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/autossh</string>
+        <string>-M</string>
+        <string>0</string>
+        <string>-N</string>
+        {% for port in tunnel_ports %}
+        <string>-L</string>
+        <string>localhost:{{ port.local }}:0.0.0.0:{{ port.remote }}</string>
+        {% endfor %}
+        <string>root@${DROPLET_IP}</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DROPLET_IP</key>
+        <string>{{ ansible_host }}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>{{ ansible_env.HOME }}/Library/Logs/activist-tunnel.log</string>
+    <key>StandardOutPath</key>
+    <string>{{ ansible_env.HOME }}/Library/Logs/activist-tunnel.log</string>
+</dict>
+</plist>

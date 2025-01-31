@@ -136,19 +136,114 @@ create_droplet() {
     sleep 2
     echo -n "."
   done
+  # Add 10s delay after droplet creation
+  sleep 10
 
-  # Write environment file with bash syntax
-  echo "export DROPLET_IP=$DROPLET_IP" > ~/.config/ssh-tunnel.env
+  # Ensure config directory exists
+  CONFIG_DIR="/Users/aasim/.config"
+  mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"
 
-  # Force bash-compatible service reload
-  launchctl bootout gui/501/local.tunnel
-  /bin/bash -c "launchctl bootstrap gui/501 ~/Library/LaunchAgents/local.tunnel.plist"
+  # Update IP in config file
+  echo "DROPLET_IP=$DROPLET_IP" > "$CONFIG_DIR/ssh-tunnel.env"
+  chmod 600 "$CONFIG_DIR/ssh-tunnel.env"
 
-  # Bash-specific process check
-  if ! /bin/bash -c "pgrep -f 'ssh.*-L 3000' >/dev/null"; then
-    echo "Error: Tunnel process not found"
+  # 4. Display verification
+  echo "Environment file verification:"
+  ls -l "$CONFIG_DIR/ssh-tunnel.env"
+  cat "$CONFIG_DIR/ssh-tunnel.env"
+
+  # Write environment file with sync
+  echo "DROPLET_IP=$DROPLET_IP" > /Users/aasim/.config/ssh-tunnel.env
+  sync
+
+  # Restart service with forced delay
+  sleep 2  # Allow file write to complete
+  launchctl bootout gui/501/local.tunnel 2>/dev/null
+  launchctl bootstrap gui/501 ~/Library/LaunchAgents/local.tunnel.plist
+
+  # Verify using lsof instead of pgrep
+  timeout 20 bash -c "while ! lsof -i :3000 | grep -q ssh; do sleep 1; done" || {
+    echo "Tunnel failed to start"
+    exit 1
+  }
+
+  # Start tunnel after everything else is done
+  if ! check_and_start_tunnel "$DROPLET_IP"; then
+    echo "Warning: Failed to establish tunnel, but droplet creation was successful"
     exit 1
   fi
+}
+
+check_and_start_tunnel() {
+  local droplet_ip=$1
+  echo "Checking remote ports and starting tunnel..."
+
+  # Get the IP address from terraform output
+  droplet_ip=$(terraform output -raw droplet_ip)
+  if [[ -z "$droplet_ip" ]]; then
+    echo "Failed to get droplet IP from terraform output"
+    return 1
+  fi
+
+  echo "Using droplet IP: $droplet_ip"
+
+  # Wait for Ansible to complete (checking for completion message in terraform output)
+  echo -n "Waiting for Ansible deployment to complete: "
+  timeout 300 bash -c "until terraform show | grep -q 'Creation complete after.*run_ansible'; do echo -n '.'; sleep 5; done" || {
+    echo -e "\nAnsible completion not detected after 5 minutes"
+    return 1
+  }
+  echo " OK"
+
+  # Initial wait for services to start
+  sleep 30
+
+  # Check port 3000 with better progress indication
+  echo -n "Checking port 3000: "
+  timeout 60 bash -c "until nc -z -w5 $droplet_ip 3000 2>/dev/null; do echo -n '.'; sleep 5; done" || {
+    echo -e "\nPort 3000 not accessible after 60 seconds"
+    return 1
+  }
+  echo " OK"
+
+  # Check port 8000 with better progress indication
+  echo -n "Checking port 8000: "
+  timeout 60 bash -c "until nc -z -w5 $droplet_ip 8000 2>/dev/null; do echo -n '.'; sleep 5; done" || {
+    echo -e "\nPort 8000 not accessible after 60 seconds"
+    return 1
+  }
+  echo " OK"
+
+  echo "Both ports are accessible. Starting tunnel..."
+
+  # Kill any existing tunnels more thoroughly
+  pkill -f "autossh.*:3000" || true
+  pkill -f "ssh.*:3000" || true
+  sleep 5
+
+  # Start new tunnel with additional SSH options
+  autossh -M 0 -N \
+    -o "ServerAliveInterval=30" \
+    -o "ServerAliveCountMax=3" \
+    -o "ExitOnForwardFailure=yes" \
+    -L localhost:3000:0.0.0.0:3000 \
+    -L localhost:8000:0.0.0.0:8000 \
+    root@"$droplet_ip" &
+
+  # More thorough tunnel verification
+  echo "Verifying tunnel..."
+  for i in {1..12}; do
+    if nc -z localhost 3000 && nc -z localhost 8000; then
+      echo "Tunnel verified - both ports accessible locally"
+      return 0
+    fi
+    echo -n "."
+    sleep 5
+  done
+
+  echo "Failed to verify tunnel after 60 seconds"
+  return 1
 }
 
 destroy_droplet() {
@@ -183,8 +278,11 @@ destroy_droplet() {
   echo "Running terraform destroy..."
   terraform init -reconfigure
   (cd "${TF_DIR}" && terraform destroy -auto-approve)
-  rm -f /Users/aasim/.config/ssh-tunnel.env
-  launchctl stop local.tunnel
+  rm -f ~/.config/ssh-tunnel.env
+  
+  # Force service stop
+  launchctl bootout gui/501/local.tunnel 2>/dev/null
+  pkill -f "ssh.*-L 3000"
 }
 
 delete_all() {
