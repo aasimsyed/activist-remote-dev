@@ -65,6 +65,7 @@
           - software-properties-common
           - apt-transport-https
           - ca-certificates
+          - python3-venv
         state: present
       when: ansible_system != 'Darwin'
 
