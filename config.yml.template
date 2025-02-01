@@ -1,51 +1,62 @@
+# Activist Development Environment Configuration Template
+# 
+# Usage:
+# 1. Copy this file to config.yml: cp config.yml.template config.yml
+# 2. Replace all placeholder values (marked with <...>)
+# 3. Adjust optional parameters as needed
+#
+# Note: Parameters marked with [REQUIRED] must be set
+# Parameters marked with [OPTIONAL] have default values
+
 # Application Configuration
 app:
-  name: "activist"
-  environment: "development"  # development, staging, production
+  name: "activist"              # [REQUIRED] Project name, used for resource naming
+  environment: "development"    # [REQUIRED] One of: development, staging, production
 
 # Project Structure
+# All paths support both absolute and ~/relative paths
 paths:
-  project_dir: "~/activist"
-  frontend_dir: "~/activist/frontend"
-  backend_dir: "~/activist/backend"
-  config_dir: "~/.config/activist"
-  log_dir: "~/Library/Logs/activist"
+  project_dir: "~/activist"     # [REQUIRED] Main project directory
+  frontend_dir: "~/activist/frontend"   # [REQUIRED] Frontend code location
+  backend_dir: "~/activist/backend"     # [REQUIRED] Backend code location
+  config_dir: "~/.config/activist"      # [OPTIONAL] Config files location
+  log_dir: "~/Library/Logs/activist"    # [OPTIONAL] Log files location
 
 # DigitalOcean Configuration
 digitalocean:
-  region: "nyc2"
-  size: "s-2vcpu-4gb"
-  image: "ubuntu-24-04-x64"
-  vpc_uuid: "5f77068a-0c82-4bf6-ac14-87f052512fd4"
-  ssh_key_name: "DigitalOcean"
-  backups: false
-  monitoring: true
+  region: "nyc2"               # [REQUIRED] Region code (e.g., nyc2, sfo3, lon1)
+  size: "s-2vcpu-4gb"         # [REQUIRED] Droplet size (e.g., s-1vcpu-2gb, s-2vcpu-4gb)
+  image: "ubuntu-24-04-x64"   # [REQUIRED] OS image (e.g., ubuntu-22-04-x64)
+  vpc_uuid: "5f77068a-0c82-4bf6-ac14-87f052512fd4"  # [REQUIRED] VPC network ID
+  ssh_key_name: "DigitalOcean" # [REQUIRED] Name of SSH key in DigitalOcean
+  backups: false              # [OPTIONAL] Enable automated backups
+  monitoring: true            # [OPTIONAL] Enable enhanced monitoring
 
 # SSH Tunnel Configuration
 tunnel:
-  ports:
-    frontend: 3000
-    backend: 8000
-    database: 5432
-  ssh:
-    user: "root"
-    key_path: "~/.ssh/id_rsa"
-    keepalive_interval: 60
-    keepalive_count: 3
-    connection_timeout: 10
-  autossh:
-    poll: 60
-    first_poll: 30
-    gatetime: 0
-    monitor_port: 0
+  ports:                      # [REQUIRED] Port forwarding configuration
+    frontend: 3000           # React development server port
+    backend: 8000            # Backend API server port
+    database: 5432           # Database port
+  ssh:                       # SSH connection settings
+    user: "root"            # [REQUIRED] SSH user for connection
+    key_path: "~/.ssh/id_rsa"  # [REQUIRED] Path to SSH private key
+    keepalive_interval: 60   # [OPTIONAL] Seconds between keepalive packets
+    keepalive_count: 3       # [OPTIONAL] Failed keepalive attempts before disconnect
+    connection_timeout: 10    # [OPTIONAL] Connection timeout in seconds
+  autossh:                   # AutoSSH specific settings
+    poll: 60                # [OPTIONAL] Connection check interval
+    first_poll: 30          # [OPTIONAL] First check delay
+    gatetime: 0             # [OPTIONAL] Restart prevention time
+    monitor_port: 0         # [OPTIONAL] Monitoring port (0 to disable)
 
 # Docker Configuration
 docker:
-  compose_file: "docker-compose.yml"
-  env_file: ".env.dev"
-  services:
-    - name: "frontend"
-      port: 3000
+  compose_file: "docker-compose.yml"  # [REQUIRED] Docker Compose file path
+  env_file: ".env.dev"               # [OPTIONAL] Environment file for Docker
+  services:                          # [REQUIRED] Service definitions
+    - name: "frontend"              # Service name in docker-compose.yml
+      port: 3000                    # External port mapping
     - name: "backend"
       port: 8000
     - name: "db"
@@ -53,46 +64,46 @@ docker:
 
 # Deployment Configuration
 deploy:
-  repository: "https://github.com/aasimsyed/activist.git"
-  branch: "main"
-  timeout:
-    ssh_wait: 180
-    ansible_retry: 300
-    yarn_install: 1800
-  retries:
-    ansible: 5
-    docker: 3
-    yarn: 3
-  delay:
+  repository: "https://github.com/<your-username>/activist.git"  # [REQUIRED] Git repo URL
+  branch: "main"                    # [REQUIRED] Branch to deploy
+  timeout:                          # [OPTIONAL] Operation timeouts (seconds)
+    ssh_wait: 180                  # SSH connection wait time
+    ansible_retry: 300             # Ansible task retry time
+    yarn_install: 1800             # Package installation timeout
+  retries:                         # [OPTIONAL] Retry attempts
+    ansible: 5                     # Ansible task retries
+    docker: 3                      # Docker operation retries
+    yarn: 3                        # Package manager retries
+  delay:                           # [OPTIONAL] Delay between retries (seconds)
     ansible: 60
     docker: 10
     yarn: 300
 
 # Node.js Configuration
 node:
-  version: "20.x"
-  package_manager:
-    yarn_version: "4.6.0"
-    npm_timeout: 300000
-    yarn_settings:
-      enableInlineBuilds: true
-      enableTelemetry: false
-      enableInteractive: false
-      enableProgressBars: false
-      httpTimeout: 600000
+  version: "20.x"                  # [REQUIRED] Node.js version
+  package_manager:                 # [OPTIONAL] Package manager settings
+    yarn_version: "4.6.0"         # Yarn version to use
+    npm_timeout: 300000           # NPM command timeout (ms)
+    yarn_settings:                # Yarn-specific settings
+      enableInlineBuilds: true    # Enable inline builds
+      enableTelemetry: false      # Disable telemetry
+      enableInteractive: false    # Disable interactive prompts
+      enableProgressBars: false   # Disable progress bars
+      httpTimeout: 600000         # HTTP request timeout (ms)
 
 # Logging Configuration
 logging:
-  level: "info"
-  file: "droplet-manager.log"
-  max_size: "10M"
-  max_files: 5
-  format: "detailed"
+  level: "info"                   # [OPTIONAL] Log level (debug, info, warn, error)
+  file: "droplet-manager.log"     # [OPTIONAL] Log file name
+  max_size: "10M"                 # [OPTIONAL] Max log file size
+  max_files: 5                    # [OPTIONAL] Number of log files to keep
+  format: "detailed"              # [OPTIONAL] Log format (simple, detailed)
 
 # Security Configuration
 security:
-  strict_host_checking: false
-  file_permissions:
-    config: "0600"
-    ssh_key: "0600"
-    logs: "0644" 
+  strict_host_checking: false     # [OPTIONAL] Enable strict SSH host checking
+  file_permissions:               # [OPTIONAL] File permission settings
+    config: "0600"               # Configuration files
+    ssh_key: "0600"             # SSH key files
+    logs: "0644"                # Log files 
