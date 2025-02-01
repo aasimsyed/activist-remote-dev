@@ -1,0 +1,98 @@
+# Application Configuration
+app:
+  name: "activist"
+  environment: "development"  # development, staging, production
+
+# Project Structure
+paths:
+  project_dir: "~/activist"
+  frontend_dir: "~/activist/frontend"
+  backend_dir: "~/activist/backend"
+  config_dir: "~/.config/activist"
+  log_dir: "~/Library/Logs/activist"
+
+# DigitalOcean Configuration
+digitalocean:
+  region: "nyc2"
+  size: "s-2vcpu-4gb"
+  image: "ubuntu-24-04-x64"
+  vpc_uuid: "5f77068a-0c82-4bf6-ac14-87f052512fd4"
+  ssh_key_name: "DigitalOcean"
+  backups: false
+  monitoring: true
+
+# SSH Tunnel Configuration
+tunnel:
+  ports:
+    frontend: 3000
+    backend: 8000
+    database: 5432
+  ssh:
+    user: "root"
+    key_path: "~/.ssh/id_rsa"
+    keepalive_interval: 60
+    keepalive_count: 3
+    connection_timeout: 10
+  autossh:
+    poll: 60
+    first_poll: 30
+    gatetime: 0
+    monitor_port: 0
+
+# Docker Configuration
+docker:
+  compose_file: "docker-compose.yml"
+  env_file: ".env.dev"
+  services:
+    - name: "frontend"
+      port: 3000
+    - name: "backend"
+      port: 8000
+    - name: "db"
+      port: 5432
+
+# Deployment Configuration
+deploy:
+  repository: "https://github.com/aasimsyed/activist.git"
+  branch: "main"
+  timeout:
+    ssh_wait: 180
+    ansible_retry: 300
+    yarn_install: 1800
+  retries:
+    ansible: 5
+    docker: 3
+    yarn: 3
+  delay:
+    ansible: 60
+    docker: 10
+    yarn: 300
+
+# Node.js Configuration
+node:
+  version: "20.x"
+  package_manager:
+    yarn_version: "4.6.0"
+    npm_timeout: 300000
+    yarn_settings:
+      enableInlineBuilds: true
+      enableTelemetry: false
+      enableInteractive: false
+      enableProgressBars: false
+      httpTimeout: 600000
+
+# Logging Configuration
+logging:
+  level: "info"
+  file: "droplet-manager.log"
+  max_size: "10M"
+  max_files: 5
+  format: "detailed"
+
+# Security Configuration
+security:
+  strict_host_checking: false
+  file_permissions:
+    config: "0600"
+    ssh_key: "0600"
+    logs: "0644" 

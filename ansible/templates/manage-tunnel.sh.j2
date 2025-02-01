@@ -1,0 +1,43 @@
+#!/bin/bash
+set -euo pipefail
+
+# Load environment variables
+source {{ ansible_env.HOME }}/.config/ssh-tunnel.env
+
+start_tunnel() {
+    echo "Starting SSH tunnel to $DROPLET_IP..."
+    autossh -M 0 -N \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ServerAliveInterval=60 \
+        -o ServerAliveCountMax=3 \
+        -o IdentitiesOnly=no \
+        -L "localhost:${FRONTEND_PORT}:0.0.0.0:${FRONTEND_PORT}" \
+        -L "localhost:${BACKEND_PORT}:0.0.0.0:${BACKEND_PORT}" \
+        -L "localhost:${DB_PORT}:0.0.0.0:${DB_PORT}" \
+        -i "$SSH_KEY_PATH" \
+        "root@${DROPLET_IP}"
+}
+
+stop_tunnel() {
+    echo "Stopping SSH tunnel..."
+    pkill -f "autossh.*${DROPLET_IP}" || true
+}
+
+case "${1:-start}" in
+    start)
+        stop_tunnel
+        start_tunnel
+        ;;
+    stop)
+        stop_tunnel
+        ;;
+    restart)
+        stop_tunnel
+        start_tunnel
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac 

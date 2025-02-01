@@ -13,7 +13,9 @@
 # - Root access on target system
 #
 # Usage:
-# ansible-playbook -i inventory deploy.yml
+# ansible-playbook -i inventory/production deploy.yml
+# or
+# ansible-playbook -i inventory/staging deploy.yml
 
 - name: Deploy Activist Application
   hosts: all
@@ -21,6 +23,7 @@
     # Set project directory based on host
     project_dir: "{{ '/root/activist' if inventory_hostname != 'localhost' else ansible_env.HOME + '/activist' }}"
     frontend_dir: "{{ project_dir }}/frontend"
+    template_dir: "{{ ansible_playbook_dir }}/templates"
   become: false
 
   handlers:
@@ -35,38 +38,75 @@
       ansible.builtin.systemd:
         daemon_reload: true
 
+  pre_tasks:
+    - name: Enable detailed output
+      ansible.builtin.debug:
+        msg: "Starting deployment with verbose output"
+
   tasks:
     # Linux-specific system preparation
-    - name: Wait for APT locks to be released
+    - name: Wait for apt lock release
       ansible.builtin.shell: |
-        while lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || lsof /var/lib/apt/lists/lock >/dev/null 2>&1 || lsof /var/lib/dpkg/lock >/dev/null 2>&1; do
+        while lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+          echo "Waiting for apt lock release..."
           sleep 5
         done
+      register: apt_wait
       changed_when: false
-      when: ansible_system != 'Darwin'
+      retries: 60
+      delay: 5
+      until: apt_wait.rc == 0
 
-    - name: Update apt cache
-      ansible.builtin.apt:
-        update_cache: true
-        cache_valid_time: 3600
-      register: apt_update
-      retries: 5
-      delay: 30
-      until: apt_update is success
+    - name: Wait for any unattended upgrade to finish
+      ansible.builtin.shell: |
+        set -o pipefail
+        while pgrep -a 'apt|dpkg' >/dev/null; do
+          echo "Active processes preventing installation:"
+          echo "Count: $(pgrep -c 'apt|dpkg')"
+          echo "PIDs: $(pgrep 'apt|dpkg' | tr '\n' ' ')"
+          echo "Commands:"
+          pgrep -a 'apt|dpkg' | awk '{$1=""; print $0}' | sed 's/^/  /'
+          echo "Lock files status:"
+          lsof /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/lib/dpkg/lock 2>/dev/null || true
+          echo "Unattended-upgrades status:"
+          systemctl status unattended-upgrades --no-pager || true
+          echo "Waiting 5 seconds for package operations to finish..."
+          sleep 5
+        done
+      args:
+        executable: /bin/bash
+      register: upgrade_wait
+      changed_when: false
+      retries: 60
+      delay: 5
+      until: upgrade_wait.rc == 0
+
+    - name: Include APT variables
+      ansible.builtin.include_vars:
+        file: vars/apt.yml
+        name: apt
       when: ansible_system != 'Darwin'
 
     - name: Install required packages
       ansible.builtin.apt:
         name:
-          - git
           - curl
           - wget
+          - git
           - gnupg2
           - software-properties-common
           - apt-transport-https
           - ca-certificates
           - python3-venv
         state: present
+        update_cache: true
+        force_apt_get: true
+      environment:
+        DEBIAN_FRONTEND: "noninteractive"
+      register: pkg_install
+      retries: 5
+      delay: 30
+      until: pkg_install is success
       when: ansible_system != 'Darwin'
 
     - name: Add Docker GPG key
@@ -77,7 +117,7 @@
 
     - name: Add Docker repository
       ansible.builtin.apt_repository:
-        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu noble stable"
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
         state: present
         update_cache: true
       when: ansible_system != 'Darwin'  # Skip on macOS
@@ -105,6 +145,8 @@
       delay: 30
       until: docker_install is success
       when: ansible_system != 'Darwin'  # Skip on macOS
+      async: 600
+      poll: 5
 
     - name: Wait for Docker to be installed
       ansible.builtin.wait_for:
@@ -121,13 +163,24 @@
       register: docker_service
       when: ansible_system != 'Darwin'  # Skip on macOS
 
+    - name: Set config file path
+      ansible.builtin.set_fact:
+        config_path: "{{ playbook_dir }}/../../config.yml"
+      delegate_to: localhost
+
+    - name: Load YAML configuration
+      ansible.builtin.include_vars:
+        file: "{{ config_path }}"
+        name: app_config
+
     - name: Clone application repository
       ansible.builtin.git:
-        repo: "https://github.com/aasimsyed/activist.git"
+        repo: "{{ app_config.deploy.repository }}"
         dest: "{{ project_dir }}"
-        version: main
+        version: "{{ app_config.deploy.branch }}"
         force: true
       when: ansible_system != 'Darwin'  # Skip on macOS
+
     # Node.js installation for Linux
     - name: Setup Node.js repository (Linux)
       ansible.builtin.uri:
@@ -349,17 +402,23 @@
 
     - name: Create SSH tunnel environment file
       ansible.builtin.template:
-        src: ansible/ssh-tunnel.env.j2
+        src: "{{ lookup('env', 'ANSIBLE_TEMPLATES_PATH') }}/ssh-tunnel.env.j2"
         dest: /etc/ssh-tunnel.env
         mode: '0600'
-      when: ansible_system != 'Darwin'  # Skip on macOS
+      when: inventory_hostname != 'localhost'
+
+    - name: Unload existing SSH tunnel LaunchAgent (macOS)
+      ansible.builtin.command: launchctl unload ~/Library/LaunchAgents/com.activist.tunnel.plist
+      failed_when: false
+      changed_when: false  # Indicates this task never reports changes
+      when: ansible_system == 'Darwin'
 
     - name: Create SSH tunnel environment file (macOS)
       ansible.builtin.template:
-        src: ansible/templates/ssh-tunnel.env.j2
+        src: "{{ lookup('env', 'ANSIBLE_TEMPLATES_PATH') }}/ssh-tunnel.env.j2"
         dest: "{{ ansible_env.HOME }}/.config/ssh-tunnel.env"
         mode: '0600'
-      when: ansible_system == 'Darwin'
+      when: inventory_hostname == 'localhost'  # Run on local machine
 
     - name: Ensure ~/.config directory exists
       ansible.builtin.file:
@@ -370,17 +429,11 @@
 
     - name: Configure SSH tunnel LaunchDaemon (macOS)
       ansible.builtin.template:
-        src: ansible/templates/com.activist.tunnel.plist.j2
+        src: "{{ lookup('env', 'ANSIBLE_TEMPLATES_PATH') }}/com.activist.tunnel.plist.j2"
         dest: "{{ ansible_env.HOME }}/Library/LaunchAgents/com.activist.tunnel.plist"
         mode: '0644'
         owner: "{{ ansible_user_id }}"
         group: "staff"
-      when: ansible_system == 'Darwin'
-
-    - name: Unload existing SSH tunnel LaunchAgent (macOS)
-      ansible.builtin.command: launchctl unload ~/Library/LaunchAgents/com.activist.tunnel.plist
-      failed_when: false
-      changed_when: false  # Indicates this task never reports changes
       when: ansible_system == 'Darwin'
 
     - name: Load SSH tunnel LaunchAgent (macOS)
@@ -406,4 +459,11 @@
         fi
       args:
         creates: "{{ '/opt/homebrew/bin/autossh' if ansible_architecture == 'arm64' else '/usr/local/bin/autossh' }}"
+      when: ansible_system == 'Darwin'
+
+    - name: Create tunnel management script
+      ansible.builtin.template:
+        src: "{{ template_dir }}/manage-tunnel.sh.j2"
+        dest: "{{ ansible_env.HOME }}/bin/manage-tunnel"
+        mode: '0755'
       when: ansible_system == 'Darwin'

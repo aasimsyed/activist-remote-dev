@@ -1,0 +1,8 @@
+apt:
+  retries: 30
+  delay: 5
+  locks:
+    - "/var/lib/dpkg/lock-frontend"
+    - "/var/lib/dpkg/lock"
+    - "/var/lib/apt/lists/lock"
+    - "/var/cache/apt/archives/lock"

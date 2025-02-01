@@ -2,9 +2,13 @@
 set -eo pipefail
 
 SCRIPT_NAME="do-droplet-manager"
-TF_DIR="$(pwd)"
+TF_DIR="$(pwd)/terraform/environments/dev"
 ANSIBLE_PLAYBOOK="${TF_DIR}/deploy.yml"
 LOG_FILE="${TF_DIR}/droplet-manager.log"
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Initialize logging
 exec > >(tee -a "${LOG_FILE}") 2>&1
@@ -86,50 +90,28 @@ run_dry_run() {
     "${ANSIBLE_PLAYBOOK}"
 }
 
-update_dns() {
-  DOMAIN="dev-asyed.com"
-  SUBDOMAIN="activist"
-  NEW_IP=$1
-
-  echo "Updating DNS A record for $SUBDOMAIN.$DOMAIN to point to $NEW_IP..."
-  
-  # Get existing record ID
-  RECORD_ID=$(doctl compute domain records list $DOMAIN \
-    --format ID,Type,Name --no-header | grep "A $SUBDOMAIN" | awk '{print $1}')
-  
-  if [ -n "$RECORD_ID" ]; then
-    # Update existing record
-    doctl compute domain records update $DOMAIN $RECORD_ID \
-      --record-type A \
-      --record-name $SUBDOMAIN \
-      --record-data $NEW_IP
-    echo "Updated existing A record"
-  else
-    # Create new record
-    doctl compute domain records create $DOMAIN \
-      --record-type A \
-      --record-name $SUBDOMAIN \
-      --record-data $NEW_IP
-    echo "Created new A record"
-  fi
-}
-
 create_droplet() {
   echo "Creating droplet..."
+  cd "${TF_DIR}"
   rm -rf .terraform* terraform.tfstate*
   terraform init
-  terraform apply -auto-approve
+  terraform apply -auto-approve \
+    -var="do_token=${DO_TOKEN}" \
+    -var="config_path=${PROJECT_ROOT}/config.yml"
   
-  # Get droplet IP through Terraform (more reliable)
+  # Get droplet IP through Terraform and verify it
   DROPLET_IP=$(terraform output -raw droplet_ip)
-  
-  # Update DNS
-  update_dns "$DROPLET_IP"
+  if [[ -z "$DROPLET_IP" ]]; then
+    echo "Error: Failed to get droplet IP from terraform output"
+    exit 1
+  fi
+  export DROPLET_IP
+  echo "Droplet IP: $DROPLET_IP"
 
-  # Wait for SSH availability
+  # Wait for SSH availability using ssh instead of nc
   echo -n "Waiting for SSH readiness..."
   for i in {1..30}; do
-    if nc -z -w5 $DROPLET_IP 22; then
+    if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@"$DROPLET_IP" 'exit' 2>/dev/null; then
       echo " OK"
       break
     fi
@@ -137,60 +119,50 @@ create_droplet() {
     echo -n "."
   done
 
-  # Add buffer time after droplet creation
-  sleep 10
-
-  # Ensure secure config directory exists
-  CONFIG_DIR="/Users/aasim/.config"
-  mkdir -p "$CONFIG_DIR"
-  chmod 700 "$CONFIG_DIR"  # Restrictive permissions
-
-  # Update IP in config file with atomic write
-  echo "DROPLET_IP=$DROPLET_IP" > "$CONFIG_DIR/ssh-tunnel.env"
-  chmod 600 "$CONFIG_DIR/ssh-tunnel.env"  # Secure file permissions
-
-  # Verify configuration
-  echo "Environment file verification:"
-  ls -l "$CONFIG_DIR/ssh-tunnel.env"
-  cat "$CONFIG_DIR/ssh-tunnel.env"
-
-  # Ensure file is written to disk
-  sync
-
-  # Service management with safety delays
-  sleep 2  # Allow file operations to complete
-  launchctl bootout gui/501/local.tunnel 2>/dev/null
-  launchctl bootstrap gui/501 ~/Library/LaunchAgents/local.tunnel.plist
-
-  # Verify tunnel establishment
-  timeout 20 bash -c "while ! lsof -i :3000 | grep -q ssh; do sleep 1; done" || {
-    echo "Tunnel failed to start"
+  # Run Ansible deployment
+  echo "Starting Ansible deployment..."
+  if [ -f "${PROJECT_ROOT}/ansible/run-ansible.sh" ]; then
+    chmod +x "${PROJECT_ROOT}/ansible/run-ansible.sh"
+    ANSIBLE_TEMPLATES_PATH="${PROJECT_ROOT}/ansible/templates" \
+    "${PROJECT_ROOT}/ansible/run-ansible.sh" "$DROPLET_IP"
+  else
+    echo "Error: run-ansible.sh not found in ${PROJECT_ROOT}/ansible/"
     exit 1
-  }
+  fi
+
+  # Only proceed with tunnel setup if Ansible was successful
+  if [ $? -eq 0 ]; then
+    # Verify the deployment
+    echo "Verifying deployment..."
+    if ! check_and_start_tunnel "$DROPLET_IP"; then
+      echo "Deployment verification failed"
+      exit 1
+    fi
+
+    # Ensure secure config directory exists
+    CONFIG_DIR="/Users/aasim/.config"
+    mkdir -p "$CONFIG_DIR"
+    chmod 700 "$CONFIG_DIR"
+
+    # Update IP in config file
+    echo "DROPLET_IP=$DROPLET_IP" > "$CONFIG_DIR/ssh-tunnel.env"
+    chmod 600 "$CONFIG_DIR/ssh-tunnel.env"
+
+    echo "Deployment complete! Starting SSH tunnel..."
+  else
+    echo "Ansible deployment failed. Check the logs for details."
+    exit 1
+  fi
 }
 
 check_and_start_tunnel() {
   local droplet_ip=$1
   echo "Checking remote ports and starting tunnel..."
 
-  # Get the IP address from terraform output
-  droplet_ip=$(terraform output -raw droplet_ip)
-  if [[ -z "$droplet_ip" ]]; then
-    echo "Failed to get droplet IP from terraform output"
-    return 1
-  fi
-
   echo "Using droplet IP: $droplet_ip"
 
-  # Wait for Ansible to complete (checking for completion message in terraform output)
-  echo -n "Waiting for Ansible deployment to complete: "
-  timeout 300 bash -c "until terraform show | grep -q 'Creation complete after.*run_ansible'; do echo -n '.'; sleep 5; done" || {
-    echo -e "\nAnsible completion not detected after 5 minutes"
-    return 1
-  }
-  echo " OK"
-
   # Initial wait for services to start
+  echo "Waiting for services to start..."
   sleep 30
 
   # Check port 3000 with better progress indication
@@ -210,10 +182,16 @@ check_and_start_tunnel() {
   echo " OK"
 
   echo "Both ports are accessible. Starting tunnel..."
+  END_TIME=$(date +%s)
+  DURATION=$((END_TIME - START_TIME))
+  echo "Total deployment time: $((DURATION/60))m:$((DURATION%60))s"
+  "${PROJECT_ROOT}/ssh-tunnel.sh" start
 
   # Kill any existing tunnels more thoroughly
   pkill -f "autossh.*:3000" || true
   pkill -f "ssh.*:3000" || true
+  pkill -f "autossh.*:8000" || true
+  pkill -f "ssh.*:8000" || true
   sleep 5
 
   # Start new tunnel with additional SSH options
@@ -223,7 +201,7 @@ check_and_start_tunnel() {
     -o "ExitOnForwardFailure=yes" \
     -L localhost:3000:0.0.0.0:3000 \
     -L localhost:8000:0.0.0.0:8000 \
-    root@"$droplet_ip" &
+    root@"$droplet_ip"
 
   # More thorough tunnel verification
   echo "Verifying tunnel..."
@@ -241,42 +219,10 @@ check_and_start_tunnel() {
 }
 
 destroy_droplet() {
-  if [ -z "$DO_TOKEN" ]; then
-    echo "Error: DO_TOKEN is not set"
-    exit 1
-  fi
-
-  echo "Debug: Current directory is $(pwd)"
-  echo "Debug: TF_DIR is ${TF_DIR}"
-  
-  echo "Terminating SSH connections..."
-  pkill -f "ssh -L.*root@.*" || true
-
-  echo "Initializing doctl authentication..."
-  doctl auth init -t "$DO_TOKEN"
-
-  echo "Listing all droplets before cleanup..."
-  doctl compute droplet list --format "ID,Name,Status,Region"
-  
-  echo "Cleaning up all droplets..."
-  doctl compute droplet list --format ID --no-header | while read -r id; do
-    if [ -n "$id" ]; then
-      echo "Deleting droplet $id..."
-      doctl compute droplet delete "$id" --force
-    fi
-  done
-
-  echo "Verifying droplets are gone..."
-  doctl compute droplet list --format "ID,Name,Status,Region"
-
   echo "Running terraform destroy..."
+  cd "${TF_DIR}"
   terraform init -reconfigure
-  (cd "${TF_DIR}" && terraform destroy -auto-approve)
-  rm -f ~/.config/ssh-tunnel.env
-  
-  # Force service stop
-  launchctl bootout gui/501/local.tunnel 2>/dev/null
-  pkill -f "ssh.*-L 3000"
+  terraform destroy -auto-approve -var="do_token=${DO_TOKEN}"
 }
 
 delete_all() {
@@ -293,17 +239,6 @@ delete_all() {
       doctl compute droplet delete "$id" --force
     fi
   done
-  
-  echo "Listing all domains..."
-  doctl compute domain list --format "Domain,TTL"
-  
-  echo "Deleting ALL domains..."
-  doctl compute domain list --format Domain --no-header | while read -r domain; do
-    if [ -n "$domain" ]; then
-      echo "Deleting domain $domain..."
-      doctl compute domain delete "$domain" --force
-    fi
-  done
 }
 
 main() {
@@ -312,6 +247,7 @@ main() {
   case "$1" in
     --create)
       validate_environment
+      START_TIME=$(date +%s)
       create_droplet
       ;;
     --destroy)
@@ -349,6 +285,22 @@ fi
 # Set from environment if not provided
 export DO_TOKEN="${DO_TOKEN:-}"
 export TF_VAR_do_token="$DO_TOKEN"
+
+# Add at the top after shebang and set
+cleanup() {
+    echo -e "\nCleaning up..."
+    pkill -f "autossh.*:3000" || true
+    pkill -f "ssh.*:3000" || true
+    
+    echo "Running delete_all as part of cleanup..."
+    delete_all
+    
+    echo "Cleanup complete"
+    exit 1
+}
+
+# Set up trap
+trap cleanup SIGINT SIGTERM
 
 # Execute main function
 main "$@"

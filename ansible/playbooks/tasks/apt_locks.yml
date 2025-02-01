@@ -1,0 +1,92 @@
+# APT Lock Management
+- name: Wait for APT locks to be released
+  ansible.builtin.shell: |
+    for lock in /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock; do
+      if [ -f "$lock" ]; then
+        while fuser "$lock" >/dev/null 2>&1; do
+          echo "Waiting for lock release: $lock"
+          sleep 1
+        done
+      fi
+    done
+    exit 0
+  register: apt_wait
+  retries: "{{ apt.retries | default(30) }}"
+  delay: "{{ apt.delay | default(5) }}"
+  until: apt_wait.rc == 0
+  changed_when: false
+  when: ansible_system != 'Darwin'
+  ignore_errors: true
+
+- name: Check if APT is running
+  ansible.builtin.shell: |
+    pgrep -f "apt|dpkg" || true
+  register: apt_processes
+  changed_when: false
+  when: 
+    - ansible_system != 'Darwin'
+    - apt_wait is failed
+
+- name: Clean up stuck APT processes
+  ansible.builtin.shell: |
+    set -e
+    for pid in $(pgrep -f "apt|dpkg"); do
+      echo "Terminating APT/DPKG process: $pid"
+      kill -15 "$pid" || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    done
+
+    for lock in /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock; do
+      if [ -f "$lock" ]; then
+        echo "Removing lock file: $lock"
+        rm -f "$lock"
+      fi
+    done
+
+    dpkg --configure -a || true
+    apt-get update -q || true
+  args:
+    executable: /bin/bash
+  when: 
+    - ansible_system != 'Darwin'
+    - apt_wait is failed
+    - apt_processes.stdout_lines | length > 0
+  register: cleanup_result
+  changed_when: cleanup_result.rc == 0
+  ignore_errors: true
+
+- name: Fail if APT locks cannot be cleared
+  ansible.builtin.fail:
+    msg: |
+      Unable to clear APT locks after multiple attempts.
+      Please check the system manually:
+      1. Run 'ps aux | grep -i apt'
+      2. Check lock files: ls -l /var/lib/dpkg/lock*
+      3. Consider rebooting if issues persist
+  when:
+    - ansible_system != 'Darwin'
+    - apt_wait is failed
+    - cleanup_result is failed
+
+- name: Investigate APT processes
+  ansible.builtin.shell: |
+    echo "=== Process holding the lock ==="
+    ps -p $(fuser /var/lib/dpkg/lock-frontend 2>/dev/null) -f || true
+    
+    echo -e "\n=== All APT/DPKG processes ==="
+    ps aux | grep -E 'apt|dpkg|unattended|cloud-init' || true
+    
+    echo -e "\n=== Cloud-Init Status ==="
+    cloud-init status || true
+    
+    echo -e "\n=== Unattended Upgrades Status ==="
+    systemctl status unattended-upgrades || true
+  register: apt_investigation
+  changed_when: false
+  when: ansible_system != 'Darwin'
+
+- name: Display investigation results
+  ansible.builtin.debug:
+    var: apt_investigation.stdout_lines
+  when: ansible_system != 'Darwin' 

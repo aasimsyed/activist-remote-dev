@@ -34,3 +34,9 @@ provider.conf
 
 # System Files
 .DS_Store
+
+# Terraform
+terraform/environments/*/terraform.tfvars
+terraform/environments/*/.terraform
+terraform/environments/*/*.tfstate*
+config.yml

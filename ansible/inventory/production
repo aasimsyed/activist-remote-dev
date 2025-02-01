@@ -1,0 +1,8 @@
+[all]
+activist.example.com
+
+[web]
+activist.example.com
+
+[db]
+db.example.com

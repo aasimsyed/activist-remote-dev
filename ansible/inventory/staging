@@ -1,0 +1,8 @@
+[all]
+staging.activist.example.com
+
+[web]
+staging.activist.example.com
+
+[db]
+staging-db.activist.example.com
