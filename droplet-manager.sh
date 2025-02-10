@@ -194,6 +194,22 @@ validate_branch() {
     return 1
   fi
 
+  # Fetch latest from remote to ensure we have current branch information
+  echo "Fetching latest from remote..."
+  if ! git fetch origin --quiet; then
+    echo "ERROR: Failed to fetch from remote repository"
+    cd "${current_dir}"
+    return 1
+  fi
+
+  # Check if branch exists on remote
+  if ! git ls-remote --heads origin "${branch}" | grep -q "${branch}"; then
+    echo "ERROR: Branch '${branch}' does not exist on remote repository"
+    echo "Please push your branch to remote before deploying"
+    cd "${current_dir}"
+    return 1
+  fi
+
   # Return to original directory
   cd "${current_dir}"
 }
@@ -239,6 +255,7 @@ create_droplet() {
   if [ -f "${PROJECT_ROOT}/ansible/run-ansible.sh" ]; then
     chmod +x "${PROJECT_ROOT}/ansible/run-ansible.sh"
     ANSIBLE_TEMPLATES_PATH="${PROJECT_ROOT}/ansible/templates" \
+    BRANCH="${BRANCH}" \
     "${PROJECT_ROOT}/ansible/run-ansible.sh" "$DROPLET_IP"
   else
     echo "Error: run-ansible.sh not found in ${PROJECT_ROOT}/ansible/"

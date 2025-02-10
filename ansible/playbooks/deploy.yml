@@ -177,9 +177,9 @@
       ansible.builtin.git:
         repo: "{{ app_config.deploy.repository }}"
         dest: "{{ project_dir }}"
-        version: "{{ app_config.deploy.branch }}"
+        version: "{{ lookup('env', 'BRANCH') }}"
         force: true
-      when: ansible_system != 'Darwin'  # Skip on macOS
+      when: inventory_hostname != 'localhost'
 
     # Node.js installation for Linux
     - name: Setup Node.js repository (Linux)
