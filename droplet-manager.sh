@@ -13,6 +13,24 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Initialize logging
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
+# Initialize variables with defaults
+BRANCH="main"
+
+# Parse branch parameter
+parse_params() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --branch)
+                BRANCH="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+}
+
 show_help() {
   cat <<EOF
 ${SCRIPT_NAME} - DigitalOcean Droplet Management
@@ -30,6 +48,7 @@ Commands:
 
 Options:
   --token TOKEN  Override DO_TOKEN environment variable
+  --branch BRANCH  Override deployment branch (defaults to main)
 
 Required Environment Variables:
   DO_TOKEN       DigitalOcean API token
@@ -48,17 +67,21 @@ validate_environment() {
 }
 
 check_dependencies() {
-  local deps=("terraform" "ansible-playbook" "jq" "doctl")
   local missing=()
-
-  for dep in "${deps[@]}"; do
-    if ! command -v "${dep}" &> /dev/null; then
-      missing+=("${dep}")
+  for cmd in doctl terraform yq; do
+    if ! command -v $cmd &> /dev/null; then
+      missing+=("$cmd")
     fi
   done
 
-  if [[ ${#missing[@]} -gt 0 ]]; then
-    echo "ERROR: Missing required dependencies: ${missing[*]}"
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo "Missing required dependencies:"
+    for dep in "${missing[@]}"; do
+      case $dep in
+        yq) echo "- yq: YAML processor (install with 'brew install yq' or 'sudo apt install yq')" ;;
+        *) echo "- $dep" ;;
+      esac
+    done
     exit 1
   fi
 }
@@ -90,14 +113,37 @@ run_dry_run() {
     "${ANSIBLE_PLAYBOOK}"
 }
 
+validate_branch() {
+  local branch=$1
+  local repo_url
+  repo_url=$(yq e '.deploy.repository' config.yml)
+  echo "Validating branch: $branch in repository $repo_url"
+  
+  # Check if branch exists
+  if ! git ls-remote --exit-code --heads "$repo_url" "refs/heads/$branch" >/dev/null 2>&1; then
+    echo -e "\nERROR: Branch '$branch' does not exist in repository $repo_url"
+    echo -e "\nAvailable branches:"
+    # Fetch and format all remote branches
+    git ls-remote --heads "$repo_url" | cut -f2 | sed -e 's|refs/heads/||' | while read -r available_branch; do
+      echo "  - $available_branch"
+    done
+    exit 1
+  fi
+}
+
 create_droplet() {
   echo "Creating droplet..."
+  
+  # Validate branch existence before proceeding
+  validate_branch "${BRANCH}"
+  
   cd "${TF_DIR}"
   rm -rf .terraform* terraform.tfstate*
   terraform init
   terraform apply -auto-approve \
     -var="do_token=${DO_TOKEN}" \
-    -var="config_path=${PROJECT_ROOT}/config.yml"
+    -var="config_path=${PROJECT_ROOT}/config.yml" \
+    -var="branch=${BRANCH}"
   
   # Get droplet IP through Terraform and verify it
   DROPLET_IP=$(terraform output -raw droplet_ip)
@@ -242,38 +288,42 @@ delete_all() {
 }
 
 main() {
-  check_dependencies
-  
-  case "$1" in
-    --create)
-      validate_environment
-      START_TIME=$(date +%s)
-      create_droplet
-      ;;
-    --destroy)
-      validate_environment
-      destroy_droplet
-      ;;
-    --delete-all)
-      delete_all
-      ;;
-    --check)
-      validate_configs
-      ;;
-    --dry-run)
-      validate_environment
-      validate_configs
-      run_dry_run
-      ;;
-    --help|-h)
-      show_help
-      ;;
-    *)
-      echo "Invalid command: $1"
-      show_help
-      exit 1
-      ;;
-  esac
+    check_dependencies
+    
+    # Parse parameters first
+    parse_params "$@"
+    
+    case "$1" in
+        --create)
+            validate_environment
+            START_TIME=$(date +%s)
+            echo "Using branch: ${BRANCH}"
+            create_droplet
+            ;;
+        --destroy)
+            validate_environment
+            destroy_droplet
+            ;;
+        --delete-all)
+            delete_all
+            ;;
+        --check)
+            validate_configs
+            ;;
+        --dry-run)
+            validate_environment
+            validate_configs
+            run_dry_run
+            ;;
+        --help|-h)
+            show_help
+            ;;
+        *)
+            echo "Invalid command: $1"
+            show_help
+            exit 1
+            ;;
+    esac
 }
 
 # Handle token override

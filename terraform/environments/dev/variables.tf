@@ -13,4 +13,10 @@ variable "delete_all" {
   description = "Whether to allow destruction of all resources"
   type        = bool
   default     = false
+}
+
+variable "branch" {
+  description = "Git branch to deploy"
+  type        = string
+  default     = "main"
 } 

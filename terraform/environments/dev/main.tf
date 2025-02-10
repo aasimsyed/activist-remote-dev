@@ -19,6 +19,7 @@ module "droplet" {
   image        = local.config.digitalocean.image
   vpc_uuid     = local.config.digitalocean.vpc_uuid
   ssh_key_name = local.config.digitalocean.ssh_key_name
+  branch       = var.branch
 }
 
 output "droplet_ip" {

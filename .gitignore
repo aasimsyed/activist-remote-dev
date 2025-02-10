@@ -8,6 +8,7 @@
 # Ansible
 .ansible/
 inventory.ini
+ansible/inventory/hosts.json
 
 # Python
 __pycache__/

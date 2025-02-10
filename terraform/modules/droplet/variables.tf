@@ -33,4 +33,10 @@ variable "monitoring" {
   description = "Enable monitoring"
   type        = bool
   default     = true
+}
+
+variable "branch" {
+  description = "Git branch to deploy"
+  type        = string
+  default     = "main"
 } 
