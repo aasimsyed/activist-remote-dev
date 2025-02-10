@@ -21,7 +21,7 @@
   hosts: all
   vars:
     # Set project directory based on host
-    project_dir: "{{ '/root/activist' if inventory_hostname != 'localhost' else ansible_env.HOME + '/activist' }}"
+    project_dir: "{{ app_config.deploy.local_path if inventory_hostname == 'localhost' else '/root/activist' }}"
     frontend_dir: "{{ project_dir }}/frontend"
     template_dir: "{{ ansible_playbook_dir }}/templates"
   become: false
@@ -467,3 +467,11 @@
         dest: "{{ ansible_env.HOME }}/bin/manage-tunnel"
         mode: '0755'
       when: ansible_system == 'Darwin'
+
+    - name: Configure development sync
+      when: inventory_hostname == 'localhost'
+      block:
+        - name: Include dev-sync role
+          ansible.builtin.include_role:
+            name: dev-sync
+          when: lookup('env', 'DEV_MODE') | bool

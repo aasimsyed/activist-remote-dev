@@ -14,14 +14,41 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
 # Initialize variables with defaults
-BRANCH="main"
+# Get current branch from the activist repo
+local_path=$(yq -r e '.deploy.local_path' config.yml) || {
+    echo "ERROR: Failed to read local_path from config.yml"
+    exit 1
+}
+
+# Add debug output
+echo "DEBUG: Activist repo path: ${local_path}"
+echo "DEBUG: Current directory: $(pwd)"
+
+# Save current directory
+current_dir=$(pwd)
+
+# Explicitly cd to activist repo and get branch
+BRANCH=$(cd "${local_path}" && git branch --show-current) || {
+    echo "ERROR: Failed to detect current branch in activist repository at ${local_path}"
+    echo "Please ensure:"
+    echo "1. The path in config.yml deploy.local_path is correct (current: ${local_path})"
+    echo "2. The directory exists and is a git repository"
+    echo "3. You are on a valid git branch"
+    exit 1
+}
+
+# Return to original directory
+cd "${current_dir}"
+
+echo "Local activist branch detected: ${BRANCH}"
 
 # Parse branch parameter
 parse_params() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --branch)
-                BRANCH="$2"
+                echo "Branch override specified: $2"
+                BRANCH="$2"  # Override detected branch if explicitly specified
                 shift 2
                 ;;
             *)
@@ -116,27 +143,69 @@ run_dry_run() {
 validate_branch() {
   local branch=$1
   local repo_url
-  repo_url=$(yq e '.deploy.repository' config.yml)
-  echo "Validating branch: $branch in repository $repo_url"
+  local local_path
+  local current_dir
+
+  # Store current directory
+  current_dir=$(pwd)
+
+  # Use -r flag with echo to properly handle backslashes
+  repo_url=$(yq -r e '.deploy.repository' config.yml)
+  local_path=$(yq -r e '.deploy.local_path' config.yml)
   
-  # Check if branch exists
-  if ! git ls-remote --exit-code --heads "$repo_url" "refs/heads/$branch" >/dev/null 2>&1; then
-    echo -e "\nERROR: Branch '$branch' does not exist in repository $repo_url"
-    echo -e "\nAvailable branches:"
-    # Fetch and format all remote branches
-    git ls-remote --heads "$repo_url" | cut -f2 | sed -e 's|refs/heads/||' | while read -r available_branch; do
-      echo "  - $available_branch"
-    done
-    exit 1
+  echo "Checking repository at ${local_path}"
+  
+  # Improve directory existence check
+  if [[ ! -d "${local_path}" ]]; then
+    echo -e "\nERROR: Local repository path does not exist: ${local_path}"
+    echo "Please check deploy.local_path in config.yml"
+    return 1
   fi
+  
+  cd "${local_path}" || {
+    echo "ERROR: Failed to change to directory: ${local_path}"
+    return 1
+  }
+  
+  # Verify this is a git repository
+  if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "ERROR: $local_path is not a git repository"
+    cd "${current_dir}"
+    return 1
+  fi
+
+  # Verify remote exists and matches config
+  local actual_remote
+  actual_remote=$(git remote get-url origin 2>/dev/null || echo "")
+  if [[ "${actual_remote}" != "${repo_url}" ]]; then
+    echo "ERROR: Repository mismatch"
+    echo "Expected: ${repo_url}"
+    echo "Found:    ${actual_remote}"
+    cd "${current_dir}"
+    return 1
+  fi
+
+  # Check for uncommitted changes
+  if [[ -n "$(git status --porcelain)" ]]; then
+    echo -e "\nERROR: You have uncommitted changes in your working directory."
+    echo "Please commit or stash your changes before deploying."
+    git status --short
+    cd "${current_dir}"
+    return 1
+  fi
+
+  # Return to original directory
+  cd "${current_dir}"
 }
 
 create_droplet() {
   echo "Creating droplet..."
   
   # Validate branch existence before proceeding
+  echo "Validating branch: ${BRANCH}"
   validate_branch "${BRANCH}"
   
+  echo "Proceeding with deployment using branch: ${BRANCH}"
   cd "${TF_DIR}"
   rm -rf .terraform* terraform.tfstate*
   terraform init
@@ -186,7 +255,7 @@ create_droplet() {
     fi
 
     # Ensure secure config directory exists
-    CONFIG_DIR="/Users/aasim/.config"
+    CONFIG_DIR="${HOME}/.config"
     mkdir -p "$CONFIG_DIR"
     chmod 700 "$CONFIG_DIR"
 
@@ -194,7 +263,16 @@ create_droplet() {
     echo "DROPLET_IP=$DROPLET_IP" > "$CONFIG_DIR/ssh-tunnel.env"
     chmod 600 "$CONFIG_DIR/ssh-tunnel.env"
 
-    echo "Deployment complete! Starting SSH tunnel..."
+    # Start dev-sync automatically
+    echo "Starting development file sync..."
+    if command -v dev-sync &> /dev/null; then
+      dev-sync start &
+      echo "Development sync started in background"
+    else
+      echo "Warning: dev-sync command not found. File syncing not enabled."
+    fi
+
+    echo "Deployment complete! SSH tunnel and file sync are running..."
   else
     echo "Ansible deployment failed. Check the logs for details."
     exit 1

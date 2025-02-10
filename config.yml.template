@@ -64,20 +64,21 @@ docker:
 
 # Deployment Configuration
 deploy:
-  repository: "https://github.com/<your-username>/activist.git"  # [REQUIRED] Git repo URL
-  branch: "main"                    # [REQUIRED] Branch to deploy
-  timeout:                          # [OPTIONAL] Operation timeouts (seconds)
-    ssh_wait: 180                  # SSH connection wait time
-    ansible_retry: 300             # Ansible task retry time
-    yarn_install: 1800             # Package installation timeout
-  retries:                         # [OPTIONAL] Retry attempts
-    ansible: 5                     # Ansible task retries
-    docker: 3                      # Docker operation retries
-    yarn: 3                        # Package manager retries
-  delay:                           # [OPTIONAL] Delay between retries (seconds)
-    ansible: 60
-    docker: 10
-    yarn: 300
+  repository: "https://github.com/your-username/activist.git"   # [REQUIRED] Git repo URL
+  branch: "main"                                                # [REQUIRED] Branch to deploy
+  local_path: "/path/to/your/activist"                          # [REQUIRED] Absolute path to local project directory
+  timeout:                                                      # [OPTIONAL] Operation timeouts (seconds)
+      ssh_wait: 180                                             # SSH connection wait time
+      ansible_retry: 300                                        # Ansible task retry time
+      yarn_install: 1800                                        # Package installation timeout
+    retries:                                                    # [OPTIONAL] Retry attempts
+  ansible: 5                                                    # Ansible task retries
+      docker: 3                                                 # Docker operation retries
+      yarn: 3                                                   # Package manager retries
+  delay:                                                        # [OPTIONAL] Delay between retries (seconds)
+      ansible: 60
+      docker: 10
+      yarn: 300
 
 # Node.js Configuration
 node:

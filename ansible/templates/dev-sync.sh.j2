@@ -1,0 +1,40 @@
+#!/bin/bash
+set -euo pipefail
+
+# Load environment variables
+source {{ ansible_env.HOME }}/.config/ssh-tunnel.env
+
+start_sync() {
+    echo "Starting development sync to $DROPLET_IP..."
+    mutagen sync create \
+        --name=activist-dev \
+        --ignore-vcs \
+        --ignore='node_modules' \
+        --ignore='dist' \
+        --ignore='*.pyc' \
+        {{ ansible_env.HOME }}/path/to/local/src \
+        "root@${DROPLET_IP}:/path/to/app/src"
+}
+
+stop_sync() {
+    echo "Stopping development sync..."
+    mutagen sync terminate activist-dev || true
+}
+
+case "${1:-start}" in
+    start)
+        stop_sync
+        start_sync
+        ;;
+    stop)
+        stop_sync
+        ;;
+    restart)
+        stop_sync
+        start_sync
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac 

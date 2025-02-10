@@ -1,0 +1,4 @@
+sync:
+  activist-dev:
+    alpha: "{{ app_config.deploy.local_path }}"
+    beta: "root@{{ lookup('env', 'DROPLET_IP') }}:/root/activist" 
