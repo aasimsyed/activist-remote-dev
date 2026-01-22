@@ -1,0 +1,49 @@
+---
+- name: Install mutagen
+  when: ansible_system == 'Darwin'
+  community.general.homebrew:
+    name: mutagen-io/mutagen/mutagen
+    state: present
+
+- name: Ensure bin directory exists
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/bin"
+    state: directory
+    mode: '0755'
+
+- name: Create mutagen config directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.mutagen"
+    state: directory
+    mode: '0755'
+
+- name: Configure mutagen sync
+  ansible.builtin.template:
+    src: mutagen.yml.j2
+    dest: "{{ ansible_env.HOME }}/.mutagen/mutagen.yml"
+    mode: '0600'
+  register: mutagen_config_result
+
+- name: Create dev sync script
+  ansible.builtin.template:
+    src: dev-sync.sh.j2
+    dest: "{{ ansible_env.HOME }}/bin/dev-sync"
+    mode: '0755'
+  register: dev_sync_result
+
+- name: Add bin to PATH if needed
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.zshrc"
+    line: 'export PATH="$HOME/bin:$PATH"'
+    state: present
+  when: ansible_system == 'Darwin'
+
+- name: Verify PATH
+  ansible.builtin.command: echo $PATH | grep -q "$HOME/bin" || echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
+  when: ansible_system == 'Darwin'
+  changed_when: false
+
+- name: Source zshrc
+  ansible.builtin.command: source ~/.zshrc
+  when: ansible_system == 'Darwin'
+  changed_when: false

@@ -1,0 +1,26 @@
+---
+- name: Configure frontend port binding
+  ansible.builtin.lineinfile:
+    path: "{{ project_dir }}/docker-compose.yml"
+    regexp: '("${FRONTEND_PORT}:${FRONTEND_PORT}")'
+    line: '"0.0.0.0:${FRONTEND_PORT}:${FRONTEND_PORT}"'
+    backrefs: true
+
+- name: Configure backend port binding
+  ansible.builtin.lineinfile:
+    path: "{{ project_dir }}/docker-compose.yml"
+    regexp: '("${BACKEND_PORT}:${BACKEND_PORT}")'
+    line: '"0.0.0.0:${BACKEND_PORT}:${BACKEND_PORT}"'
+    backrefs: true
+
+- name: Wait for cloud-init
+  ansible.builtin.shell: |
+    set -eo pipefail
+    cloud-init status --wait
+  args:
+    executable: /bin/bash
+  register: cloud_init_wait
+  until: cloud_init_wait.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false

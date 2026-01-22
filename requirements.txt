@@ -167,3 +167,4 @@ Werkzeug==3.0.4
 yamllint==1.35.1
 yarl==1.10.0
 zipp==3.21.0
+django-csp>=3.7

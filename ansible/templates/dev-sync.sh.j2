@@ -1,0 +1,173 @@
+#!/bin/bash
+
+# Activist Development Sync Script
+# Uses Mutagen for real-time file synchronization
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Configuration
+SESSION_NAME="activist-dev"
+LOCAL_PATH="{{ app_config.deploy.local_path }}"
+REMOTE_HOST="{{ hostvars[groups['all'][0]]['ansible_host'] }}"
+REMOTE_PATH="{{ project_dir }}"
+REMOTE_USER="root"
+
+# Functions
+print_status() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+show_help() {
+    cat << EOF
+Activist Development Sync Script
+
+USAGE:
+    dev-sync [COMMAND]
+
+COMMANDS:
+    start       Start Mutagen sync session
+    stop        Stop Mutagen sync session
+    restart     Restart Mutagen sync session
+    status      Show sync session status
+    logs        Show sync session logs
+    reset       Reset sync session (flush and restart)
+    help        Show this help message
+
+EXAMPLES:
+    dev-sync start
+    dev-sync status
+    dev-sync logs
+EOF
+}
+
+start_sync() {
+    print_status "Starting Mutagen sync session..."
+    
+    # Check if session already exists
+    if mutagen sync list | grep -q "$SESSION_NAME"; then
+        print_warning "Session '$SESSION_NAME' already exists. Use 'restart' to recreate it."
+        return 1
+    fi
+    
+    # Create sync session
+    mutagen sync create \
+        --name="$SESSION_NAME" \
+        --configuration-file="$HOME/.mutagen/mutagen.yml" \
+        "$LOCAL_PATH" \
+        "$REMOTE_USER@$REMOTE_HOST:$REMOTE_PATH"
+    
+    print_success "Sync session '$SESSION_NAME' started"
+    print_status "Use 'dev-sync status' to monitor sync progress"
+}
+
+stop_sync() {
+    print_status "Stopping Mutagen sync session..."
+    
+    if ! mutagen sync list | grep -q "$SESSION_NAME"; then
+        print_warning "Session '$SESSION_NAME' not found"
+        return 1
+    fi
+    
+    mutagen sync terminate "$SESSION_NAME"
+    print_success "Sync session '$SESSION_NAME' stopped"
+}
+
+restart_sync() {
+    print_status "Restarting Mutagen sync session..."
+    
+    # Stop if exists
+    if mutagen sync list | grep -q "$SESSION_NAME"; then
+        stop_sync
+    fi
+    
+    # Start again
+    start_sync
+}
+
+show_status() {
+    print_status "Mutagen sync status:"
+    echo
+    
+    if mutagen sync list | grep -q "$SESSION_NAME"; then
+        mutagen sync monitor "$SESSION_NAME" --long
+    else
+        print_warning "No active sync session found"
+        echo "Run 'dev-sync start' to begin syncing"
+    fi
+}
+
+show_logs() {
+    print_status "Mutagen sync logs:"
+    echo
+    
+    if mutagen sync list | grep -q "$SESSION_NAME"; then
+        mutagen sync monitor "$SESSION_NAME"
+    else
+        print_warning "No active sync session found"
+    fi
+}
+
+reset_sync() {
+    print_status "Resetting Mutagen sync session..."
+    
+    if mutagen sync list | grep -q "$SESSION_NAME"; then
+        print_status "Flushing sync session..."
+        mutagen sync flush "$SESSION_NAME"
+        print_status "Restarting sync session..."
+        restart_sync
+    else
+        print_warning "No session to reset. Starting new session..."
+        start_sync
+    fi
+}
+
+# Main script logic
+case "${1:-help}" in
+    start)
+        start_sync
+        ;;
+    stop)
+        stop_sync
+        ;;
+    restart)
+        restart_sync
+        ;;
+    status)
+        show_status
+        ;;
+    logs)
+        show_logs
+        ;;
+    reset)
+        reset_sync
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        print_error "Unknown command: $1"
+        echo
+        show_help
+        exit 1
+        ;;
+esac
+

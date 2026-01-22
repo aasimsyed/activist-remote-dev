@@ -1,0 +1,7 @@
+---
+- name: Restart tunnel service
+  ansible.builtin.command: |
+    launchctl unload ~/Library/LaunchAgents/com.activist.tunnel.plist || true
+    launchctl load ~/Library/LaunchAgents/com.activist.tunnel.plist
+  when: ansible_system == 'Darwin'
+  changed_when: false

@@ -1,0 +1,58 @@
+sync:
+  defaults:
+    mode: "two-way-resolved"
+    ignore:
+      vcs: true
+      paths:
+        - ".git"
+        - "node_modules"
+        - ".terraform"
+        - "*.log"
+        - ".DS_Store"
+        - "__pycache__"
+        - "*.pyc"
+        - ".pytest_cache"
+        - "coverage"
+        - ".coverage"
+        - "venv"
+        - ".pnp.cjs"
+        - ".pnp.js"
+        - ".pnp.loader.mjs"
+        - ".yarn/cache"
+        - ".yarn/unplugged"
+        - ".yarn/build-state.yml"
+        - ".yarn/install-state.gz"
+    stageMode: "neighboring"
+    permissions:
+      defaultFileMode: 0644
+      defaultDirectoryMode: 0755
+      defaultOwner: "{{ ansible_user_id }}"
+      defaultGroup: "staff"
+
+  activist-dev:
+    alpha: "{{ app_config.deploy.local_path }}"
+    beta: "root@{{ hostvars[groups['all'][0]]['ansible_host'] }}:{{ project_dir }}"
+    mode: "one-way-replica"
+    ignore:
+      paths:
+        - ".git"
+        - "node_modules"
+        - ".terraform"
+        - "*.log"
+        - ".DS_Store"
+        - "__pycache__"
+        - "*.pyc"
+        - ".pytest_cache"
+        - "coverage"
+        - ".coverage"
+        - "venv"
+        - ".pnp.cjs"
+        - ".pnp.js"
+        - ".pnp.loader.mjs"
+        - ".yarn/cache"
+        - ".yarn/unplugged"
+        - ".yarn/build-state.yml"
+        - ".yarn/install-state.gz"
+        - "docker-compose.yml"
+        - ".env*"
+

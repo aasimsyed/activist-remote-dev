@@ -131,19 +131,71 @@ validate_branch() {
   fi
 }
 
+# Function to ensure SSH key is synchronized with DigitalOcean
+sync_ssh_key() {
+  echo "Synchronizing SSH key with DigitalOcean..."
+  
+  # Get local public key
+  LOCAL_SSH_KEY="$HOME/.ssh/id_rsa.pub"
+  if [[ ! -f "$LOCAL_SSH_KEY" ]]; then
+    echo "Error: Local SSH public key not found at $LOCAL_SSH_KEY"
+    exit 1
+  fi
+  
+  # Get local key fingerprint
+  LOCAL_FINGERPRINT=$(ssh-keygen -lf "$LOCAL_SSH_KEY" | awk '{print $2}')
+  echo "Local key fingerprint: $LOCAL_FINGERPRINT"
+  
+  # Check if DigitalOcean key exists and matches
+  SSH_KEY_NAME="DigitalOcean"
+  EXISTING_KEY=$(doctl compute ssh-key list --format ID,Name,FingerPrint --no-header | grep "$SSH_KEY_NAME" || true)
+  
+  if [[ -n "$EXISTING_KEY" ]]; then
+    EXISTING_FINGERPRINT=$(echo "$EXISTING_KEY" | awk '{print $3}')
+    EXISTING_ID=$(echo "$EXISTING_KEY" | awk '{print $1}')
+    
+    # Convert SHA256 to MD5 format for comparison if needed
+    if [[ "$LOCAL_FINGERPRINT" == SHA256:* ]]; then
+      # DigitalOcean shows MD5, convert local SHA256 to MD5 for comparison
+      LOCAL_MD5=$(ssh-keygen -E md5 -lf "$LOCAL_SSH_KEY" | awk '{print $2}' | sed 's/MD5://')
+    else
+      LOCAL_MD5="$LOCAL_FINGERPRINT"
+    fi
+    
+    if [[ "$EXISTING_FINGERPRINT" == "$LOCAL_MD5" ]]; then
+      echo "SSH key already matches. Using existing key ID: $EXISTING_ID"
+      return 0
+    else
+      echo "SSH key fingerprint mismatch. Updating DigitalOcean key..."
+      echo "  Existing: $EXISTING_FINGERPRINT"
+      echo "  Local:    $LOCAL_MD5"
+      
+      # Delete old key
+      doctl compute ssh-key delete "$EXISTING_ID" --force
+    fi
+  fi
+  
+  # Create/recreate the SSH key
+  echo "Adding local SSH key to DigitalOcean..."
+  doctl compute ssh-key create "$SSH_KEY_NAME" --public-key "$(cat "$LOCAL_SSH_KEY")"
+  
+  echo "SSH key synchronized successfully!"
+}
+
 create_droplet() {
   echo "Creating droplet..."
   
-  # Validate branch existence before proceeding
-  validate_branch "${BRANCH}"
+  # Ensure SSH key is synchronized before creating droplet
+  sync_ssh_key
+  
+  # Note: Using rsync from local directory, no branch validation needed
   
   cd "${TF_DIR}"
   rm -rf .terraform* terraform.tfstate*
   terraform init
   terraform apply -auto-approve \
     -var="do_token=${DO_TOKEN}" \
-    -var="config_path=${PROJECT_ROOT}/config.yml" \
-    -var="branch=${BRANCH}"
+    -var="config_path=${PROJECT_ROOT}/config.yml"
   
   # Get droplet IP through Terraform and verify it
   DROPLET_IP=$(terraform output -raw droplet_ip)
@@ -194,11 +246,239 @@ create_droplet() {
     echo "DROPLET_IP=$DROPLET_IP" > "$CONFIG_DIR/ssh-tunnel.env"
     chmod 600 "$CONFIG_DIR/ssh-tunnel.env"
 
+    # Set up real-time code synchronization
+    setup_code_sync "$DROPLET_IP"
+
     echo "Deployment complete! Starting SSH tunnel..."
   else
     echo "Ansible deployment failed. Check the logs for details."
     exit 1
   fi
+}
+
+# Function for real-time code synchronization
+setup_code_sync() {
+  local droplet_ip=$1
+  echo "Setting up real-time code synchronization..."
+  
+  # Parse local and remote directory paths from config.yml
+  LOCAL_DIR=$(yq e '.deploy.local_path' "${PROJECT_ROOT}/config.yml" | sed 's/^~/'"$HOME"'/')
+  if [[ -z "$LOCAL_DIR" || "$LOCAL_DIR" == "null" ]]; then
+    LOCAL_DIR="${PROJECT_ROOT}"
+  fi
+  
+  REMOTE_DIR=$(yq e '.paths.project_dir' "${PROJECT_ROOT}/config.yml" | sed 's/^~/\/root/')
+  if [[ -z "$REMOTE_DIR" || "$REMOTE_DIR" == "null" ]]; then
+    REMOTE_DIR="/root/activist"
+  fi
+  
+  # Get SSH key path from config
+  SSH_KEY_PATH=$(yq e '.tunnel.ssh.key_path' "${PROJECT_ROOT}/config.yml" | sed 's/^~/'"$HOME"'/')
+  if [[ -z "$SSH_KEY_PATH" || "$SSH_KEY_PATH" == "null" ]]; then
+    SSH_KEY_PATH="$HOME/.ssh/id_rsa"
+  fi
+  
+  # Create sync script
+  SYNC_SCRIPT="${PROJECT_ROOT}/code-sync.sh"
+  cat > "$SYNC_SCRIPT" <<EOL
+#!/bin/bash
+# Auto-generated code sync script
+set -e
+
+# Configuration
+LOCAL_DIR="${LOCAL_DIR}"
+REMOTE_USER="root"
+REMOTE_HOST="${droplet_ip}"
+REMOTE_DIR="${REMOTE_DIR}"
+WATCH_DIRS=("frontend" "backend" "utils")
+LOG_FILE="${PROJECT_ROOT}/code-sync.log"
+EXCLUDE_PATTERNS=(".git" "*.log" ".terraform" "*.tfstate" "node_modules")
+SSH_KEY_PATH="${SSH_KEY_PATH}"
+PID_FILE="${PROJECT_ROOT}/.code-sync.pid"
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Check if already running
+if [ -f "\$PID_FILE" ] && ps -p \$(cat "\$PID_FILE") > /dev/null; then
+    echo -e "\${YELLOW}Code sync is already running with PID \$(cat "\$PID_FILE").${NC}"
+    echo "To stop it, run: \$0 stop"
+    exit 0
+fi
+
+# Check dependencies
+if ! command -v fswatch &> /dev/null; then
+    echo -e "\${RED}Error: fswatch is not installed. Install with:${NC}"
+    echo "  brew install fswatch"
+    exit 1
+fi
+
+if ! command -v rsync &> /dev/null; then
+    echo -e "\${RED}Error: rsync is not installed. Install with:${NC}"
+    echo "  brew install rsync"
+    exit 1
+fi
+
+# Build exclude pattern
+EXCLUDE_ARGS=""
+for pattern in "\${EXCLUDE_PATTERNS[@]}"; do
+    EXCLUDE_ARGS="\$EXCLUDE_ARGS --exclude='\$pattern'"
+done
+
+# Function to sync files to remote
+sync_to_remote() {
+    local changed_file="\$1"
+    echo "\$(date '+%Y-%m-%d %H:%M:%S') - Syncing: \$changed_file" | tee -a "\$LOG_FILE"
+
+    # Create the directory structure on the remote if it doesn't exist
+    local dir_path=\$(dirname "\$changed_file")
+    ssh -i "\$SSH_KEY_PATH" -o StrictHostKeyChecking=no "\$REMOTE_USER@\$REMOTE_HOST" "mkdir -p \$REMOTE_DIR/\$dir_path"
+
+    # Use rsync to copy the file
+    eval rsync -azP --delete \$EXCLUDE_ARGS -e \"ssh -i \$SSH_KEY_PATH -o StrictHostKeyChecking=no\" \"\$LOCAL_DIR/\$changed_file\" \"\$REMOTE_USER@\$REMOTE_HOST:\$REMOTE_DIR/\$dir_path/\"
+
+    echo -e "\${GREEN}Sync completed: \$changed_file\${NC}" | tee -a "\$LOG_FILE"
+}
+
+# Function to perform initial full sync
+initial_sync() {
+    echo -e "\${YELLOW}Performing initial full sync...${NC}" | tee -a "\$LOG_FILE"
+    
+    # Ensure important config files are synced even if they might be excluded
+    echo "\$(date '+%Y-%m-%d %H:%M:%S') - Syncing critical config files..." | tee -a "\$LOG_FILE"
+    
+    # Sync .yarnrc.yml specifically to ensure correct Yarn configuration
+    if [ -f "\$LOCAL_DIR/frontend/.yarnrc.yml" ]; then
+        rsync -azP -e \"ssh -i \$SSH_KEY_PATH -o StrictHostKeyChecking=no\" \"\$LOCAL_DIR/frontend/.yarnrc.yml\" \"\$REMOTE_USER@\$REMOTE_HOST:\$REMOTE_DIR/frontend/\" || echo \"Warning: Failed to sync .yarnrc.yml\"
+    fi
+    
+    # Sync environment files
+    for env_file in .env .env.dev .env.dev.local .env.local; do
+        if [ -f "\$LOCAL_DIR/\$env_file" ]; then
+            rsync -azP -e \"ssh -i \$SSH_KEY_PATH -o StrictHostKeyChecking=no\" \"\$LOCAL_DIR/\$env_file\" \"\$REMOTE_USER@\$REMOTE_HOST:\$REMOTE_DIR/\" || echo \"Warning: Failed to sync \$env_file\"
+        fi
+    done
+    
+    # Perform main sync
+    eval rsync -azP --delete \$EXCLUDE_ARGS -e \"ssh -i \$SSH_KEY_PATH -o StrictHostKeyChecking=no\" \"\$LOCAL_DIR/\" \"\$REMOTE_USER@\$REMOTE_HOST:\$REMOTE_DIR/\"
+    
+    echo -e "\${GREEN}Initial sync completed${NC}" | tee -a "\$LOG_FILE"
+}
+
+# Function to handle signals
+cleanup() {
+    echo -e "\n\${YELLOW}Stopping code sync service...${NC}"
+    if [ -f "\$PID_FILE" ]; then
+        rm "\$PID_FILE"
+    fi
+    exit 0
+}
+
+# Function to stop the sync process
+stop_sync() {
+    if [ ! -f "\$PID_FILE" ]; then
+        echo -e "\${YELLOW}No code sync process found.${NC}"
+        return 0
+    fi
+    
+    local pid=\$(cat "\$PID_FILE")
+    if ps -p "\$pid" > /dev/null; then
+        echo -e "\${YELLOW}Stopping code sync process (PID: \$pid)...${NC}"
+        kill "\$pid"
+        rm "\$PID_FILE"
+        echo -e "\${GREEN}Code sync stopped.${NC}"
+    else
+        echo -e "\${YELLOW}Code sync process not running. Cleaning up.${NC}"
+        rm "\$PID_FILE"
+    fi
+}
+
+# Handle stop command
+if [ "\$1" = "stop" ]; then
+    stop_sync
+    exit 0
+fi
+
+# Trap signals
+trap cleanup SIGINT SIGTERM
+
+# Display config
+echo -e "\${GREEN}Code Sync Service${NC}"
+echo -e "\${YELLOW}Configuration:${NC}"
+echo "  Local directory: \$LOCAL_DIR"
+echo "  Remote server: \$REMOTE_USER@\$REMOTE_HOST"
+echo "  Remote directory: \$REMOTE_DIR"
+echo "  SSH key: \$SSH_KEY_PATH"
+echo "  Watching directories:"
+for dir in "\${WATCH_DIRS[@]}"; do
+    echo "    - \$dir"
+done
+
+# Handle interactive/automatic mode
+if [ "\$1" = "interactive" ]; then
+    # Interactive mode with prompt
+    read -p "Perform initial full sync? (y/n): " confirm
+    if [[ \$confirm == [yY] || \$confirm == [yY][eE][sS] ]]; then
+        initial_sync
+    fi
+else
+    # Non-interactive mode, always do initial sync
+    initial_sync
+fi
+
+# Start watching for changes
+echo -e "\${GREEN}Starting watch service. Process running in background.${NC}"
+echo "Logs will be saved to \$LOG_FILE"
+echo "To stop the service run: \$0 stop"
+
+# Save PID to file for management
+echo "\$\$" > "\$PID_FILE"
+
+# Use fswatch to detect changes and trigger sync
+watch_paths=""
+for dir in "\${WATCH_DIRS[@]}"; do
+    if [ -d "\$LOCAL_DIR/\$dir" ]; then
+        watch_paths="\$watch_paths \$LOCAL_DIR/\$dir"
+    fi
+done
+
+fswatch -0 -r \$watch_paths | while read -d "" event; do
+    # Get the relative path
+    rel_path=\${event#\$LOCAL_DIR/}
+    
+    # Skip excluded patterns
+    skip=false
+    for pattern in "\${EXCLUDE_PATTERNS[@]}"; do
+        if [[ "\$rel_path" == *\$pattern* ]]; then
+            skip=true
+            break
+        fi
+    done
+    
+    if [ "\$skip" = true ]; then
+        continue
+    fi
+    
+    echo "Change detected: \$rel_path"
+    sync_to_remote "\$rel_path"
+done
+EOL
+
+  # Make the script executable
+  chmod +x "$SYNC_SCRIPT"
+  
+  echo -e "\nStarting real-time code synchronization..."
+  
+  # Start the code sync in the background
+  nohup "$SYNC_SCRIPT" > /dev/null 2>&1 &
+  
+  echo -e "Code sync service started automatically in the background."
+  echo -e "Your code changes will automatically sync to the remote droplet at ${droplet_ip}"
+  echo -e "To stop the service run: ${SYNC_SCRIPT} stop"
+  echo -e "To view logs: cat ${PROJECT_ROOT}/code-sync.log"
 }
 
 check_and_start_tunnel() {
@@ -297,7 +577,7 @@ main() {
         --create)
             validate_environment
             START_TIME=$(date +%s)
-            echo "Using branch: ${BRANCH}"
+            echo "Syncing local code: ${PROJECT_ROOT}"
             create_droplet
             ;;
         --destroy)

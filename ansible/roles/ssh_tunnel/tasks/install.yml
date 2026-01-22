@@ -1,0 +1,19 @@
+---
+- name: Install autossh (Linux)
+  ansible.builtin.apt:
+    name: autossh
+    state: present
+    update_cache: true
+  when: ansible_system != 'Darwin'
+
+- name: Install autossh (macOS)
+  ansible.builtin.shell: |
+    set -eo pipefail
+    if [ -d "/opt/homebrew" ]; then
+      /opt/homebrew/bin/brew install autossh
+    else
+      /usr/local/bin/brew install autossh
+    fi
+  args:
+    creates: "{{ '/opt/homebrew/bin/autossh' if ansible_architecture == 'arm64' else '/usr/local/bin/autossh' }}"
+  when: ansible_system == 'Darwin'

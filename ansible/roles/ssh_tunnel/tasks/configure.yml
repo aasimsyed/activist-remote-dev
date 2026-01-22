@@ -1,0 +1,14 @@
+---
+- name: Create required directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ ansible_env.HOME }}/bin"
+    - "{{ ansible_env.HOME }}/.config"
+    - "{{ ansible_env.HOME }}/Library/Logs"
+  when: ansible_system == 'Darwin'
+
+- name: Configure tunnel files
+  ansible.builtin.include_tasks: "{{ ansible_system | lower }}_config.yml"

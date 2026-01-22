@@ -685,3 +685,68 @@ We appreciate all contributions, whether it's code, documentation, or bug report
 ### [0.0.1] - 2025-01-28
 
 - **Initial Release**: Basic functionality for remote development environment
+
+## Real-time Code Synchronization
+
+This repository includes a real-time code synchronization system that automatically syncs your local code changes to the remote droplet. This ensures that your development environment is always up-to-date with your latest changes.
+
+### Overview
+
+The code sync feature is automatically set up and started as part of the `droplet-manager.sh --create` process. When you create a new droplet, the code sync service will:
+
+1. Generate a customized sync script based on your configuration
+2. Perform an initial full sync of your project files to the remote droplet
+3. Start watching for file changes and automatically sync them in real-time
+4. Run in the background so you can continue working without interruption
+
+### Prerequisites
+
+- fswatch (`brew install fswatch`)
+- rsync (pre-installed on most Unix systems)
+- SSH access to your remote droplet (automatically configured)
+
+### Managing the Code Sync Service
+
+The code sync service runs automatically, but you can control it manually if needed:
+
+```bash
+# Stop the code sync service
+./code-sync.sh stop
+
+# Start the code sync service in interactive mode
+./code-sync.sh interactive
+
+# Start the code sync service in automatic mode
+./code-sync.sh
+```
+
+### How It Works
+
+The real-time code sync service:
+- Uses `rsync` for efficient file transfers
+- Watches your local files for changes using `fswatch`
+- Syncs only the changed files for minimal network usage
+- Automatically creates directory structures on the remote as needed
+- Runs as a background process that doesn't interrupt your workflow
+
+### Monitoring and Troubleshooting
+
+To monitor the sync process:
+```bash
+# View sync logs
+cat code-sync.log
+
+# Check if the service is running
+ps aux | grep code-sync
+
+# Restart the service if needed
+./code-sync.sh stop && ./code-sync.sh
+```
+
+### Customization
+
+The sync script is generated based on your `config.yml` settings:
+- Project directories are read from your configuration
+- SSH key paths are automatically determined
+- Watch directories default to "frontend", "backend", and "utils"
+- Excluded patterns can be modified in the generated script

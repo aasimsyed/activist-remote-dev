@@ -1,0 +1,57 @@
+---
+- name: Install Docker packages
+  ansible.builtin.include_tasks: install_docker.yml
+  when: inventory_hostname != 'localhost'
+
+- name: Wait for Docker to be ready
+  ansible.builtin.wait_for:
+    path: /usr/bin/docker
+    timeout: 60
+  when: inventory_hostname != 'localhost'
+
+- name: Enable Docker service
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: inventory_hostname != 'localhost'
+
+- name: Clone application repository
+  ansible.builtin.git:
+    repo: "{{ app_config.deploy.repository }}"
+    dest: "{{ project_dir }}"
+    version: "{{ lookup('env', 'BRANCH') }}"
+    force: true
+  when: inventory_hostname != 'localhost'
+
+- name: Deploy services
+  ansible.builtin.include_tasks: deploy_services.yml
+  when: inventory_hostname != 'localhost'
+
+- name: Configure ports
+  ansible.builtin.include_tasks: configure_ports.yml
+  when: inventory_hostname != 'localhost'
+
+- name: Verify port bindings
+  ansible.builtin.wait_for:
+    host: "0.0.0.0"
+    port: "{{ item }}"
+    timeout: 300
+  loop:
+    - "{{ frontend_port }}"
+    - "{{ backend_port }}"
+
+- name: Verify service availability
+  ansible.builtin.uri:
+    url: "http://localhost:{{ item }}/"
+    return_content: true
+    status_code: [200, 301, 302, 404]
+    validate_certs: false
+  register: service_check
+  until: service_check.status != -1
+  retries: 10
+  delay: 30
+  loop:
+    - "{{ frontend_port }}"
+    - "{{ backend_port }}"

@@ -1,0 +1,39 @@
+---
+- name: Include variables
+  ansible.builtin.include_vars:
+    file: "{{ item }}"
+  loop:
+    - "defaults/main.yml"
+    - "vars/main.yml"
+
+- name: Create required directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ ansible_env.HOME }}/bin"
+    - "{{ ansible_env.HOME }}/.config"
+    - "{{ ansible_env.HOME }}/Library/Logs"
+  when: ansible_system == 'Darwin'
+
+- name: Create tunnel management script
+  ansible.builtin.template:
+    src: "manage-tunnel.sh.j2"
+    dest: "{{ ansible_env.HOME }}/bin/manage-tunnel"
+    mode: '0755'
+  when: ansible_system == 'Darwin'
+
+- name: Create SSH tunnel environment file
+  ansible.builtin.template:
+    src: "ssh-tunnel.env.j2"
+    dest: "{{ ansible_env.HOME }}/.config/ssh-tunnel.env"
+    mode: '0600'
+
+- name: Configure LaunchAgent
+  ansible.builtin.template:
+    src: "com.activist.tunnel.plist.j2"
+    dest: "{{ ansible_env.HOME }}/Library/LaunchAgents/com.activist.tunnel.plist"
+    mode: '0644'
+  when: ansible_system == 'Darwin'
+  notify: Restart tunnel service

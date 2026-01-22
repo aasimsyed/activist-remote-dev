@@ -1,0 +1,15 @@
+---
+ssh_tunnel_config:
+  ports:
+    frontend: 3000
+    backend: 8000
+    database: 5432
+  ssh:
+    keepalive_interval: 60
+    keepalive_count: 3
+    connection_timeout: 10
+  autossh:
+    poll: 60
+    first_poll: 30
+    gatetime: 0
+    monitor_port: 0

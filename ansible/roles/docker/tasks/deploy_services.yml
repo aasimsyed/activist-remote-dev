@@ -1,0 +1,43 @@
+---
+- name: Stop all services to ensure clean restart with USE_PREVIEW
+  community.docker.docker_compose_v2:
+    project_src: "{{ project_dir }}"
+    env_files:
+      - .env.dev
+    env:
+      USE_PREVIEW: "true"
+    files:
+      - docker-compose.yml
+    state: absent
+  ignore_errors: true
+
+- name: Deploy backend and database first
+  community.docker.docker_compose_v2:
+    project_src: "{{ project_dir }}"
+    env_files:
+      - .env.dev
+    env:
+      USE_PREVIEW: "true"
+    services:
+      - backend
+      - db
+    build: always
+    state: present
+
+- name: Deploy full application stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ project_dir }}"
+    env_files:
+      - .env.dev
+    env:
+      USE_PREVIEW: "true"
+    files:
+      - docker-compose.yml
+    state: present
+    pull: "always"
+    remove_orphans: true
+    build: "always"
+  register: compose_result
+  until: compose_result is success
+  retries: 3
+  delay: 10

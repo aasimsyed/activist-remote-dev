@@ -24,24 +24,15 @@
     project_dir: "{{ '/root/activist' if inventory_hostname != 'localhost' else ansible_env.HOME + '/activist' }}"
     frontend_dir: "{{ project_dir }}/frontend"
     template_dir: "{{ ansible_playbook_dir }}/templates"
+    app_user: "{{ ansible_user | default('root') }}"
   become: false
 
   handlers:
-    - name: Debug Docker installation output
-      ansible.builtin.debug:
-        var: docker_install
-    - name: Debug Yarn migration status
-      ansible.builtin.debug:
-        var: yarn_migration
-      when: false
     - name: Reload systemd
       ansible.builtin.systemd:
         daemon_reload: true
 
   pre_tasks:
-    - name: Enable detailed output
-      ansible.builtin.debug:
-        msg: "Starting deployment with verbose output"
 
   tasks:
     # Linux-specific system preparation
@@ -98,9 +89,11 @@
           - apt-transport-https
           - ca-certificates
           - python3-venv
+          - python3-pip
         state: present
         update_cache: true
         force_apt_get: true
+      become: true
       environment:
         DEBIAN_FRONTEND: "noninteractive"
       register: pkg_install
@@ -173,12 +166,33 @@
         file: "{{ config_path }}"
         name: app_config
 
+    - name: Ensure project directory exists
+      ansible.builtin.file:
+        path: "{{ project_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0755'
+      become: "{{ ansible_system != 'Darwin' }}"
+      when: ansible_system != 'Darwin'  # Skip on macOS
+
+    - name: Get current git branch from local repository
+      ansible.builtin.command: git rev-parse --abbrev-ref HEAD
+      args:
+        chdir: "{{ app_config.deploy.local_path }}"
+      register: current_branch
+      delegate_to: localhost
+      changed_when: false
+
     - name: Clone application repository
       ansible.builtin.git:
         repo: "{{ app_config.deploy.repository }}"
         dest: "{{ project_dir }}"
-        version: "{{ app_config.deploy.branch }}"
+        version: "{{ current_branch.stdout }}"
         force: true
+        update: true
+      become: "{{ ansible_system != 'Darwin' }}"
+      become_user: "{{ app_user }}"
       when: ansible_system != 'Darwin'  # Skip on macOS
 
     # Node.js installation for Linux
@@ -242,40 +256,57 @@
 
     - name: Set project Yarn version
       ansible.builtin.shell: |
-        yarn set version berry 2>&1
+        if [ -d "{{ frontend_dir }}" ]; then
+          cd "{{ frontend_dir }}"
+          # Add timeout to prevent hanging
+          timeout 60 yarn set version berry 2>&1 || echo "Yarn version set timed out, continuing anyway"
+          echo "Yarn version set completed or timed out"
+          exit 0
+        else
+          echo "Frontend directory not found, skipping Yarn version set"
+          exit 0
+        fi
       args:
-        chdir: "{{ frontend_dir }}"
         executable: /bin/bash
       environment:
         PATH: "/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
+      register: yarn_version_result
+      changed_when: false
+      when: inventory_hostname != 'localhost'
+      # Add async to prevent task from hanging
+      async: 120
+      poll: 5
+
+    - name: Check Yarn is available
+      ansible.builtin.shell: |
+        set -eo pipefail
+        which yarn || (echo "Yarn not found in PATH" && exit 1)
+        yarn --version
+      args:
+        executable: /bin/bash
+      register: yarn_check
       changed_when: false
       when: inventory_hostname != 'localhost'
 
     - name: Pre-cache Yarn dependencies
       ansible.builtin.shell: |
-        yarn config set enableInlineBuilds true
-        yarn config set enableTelemetry false
-        yarn config set httpTimeout 300000
+        set -eo pipefail
+        echo "Setting Yarn configuration..."
+        timeout 30 yarn config set enableInlineBuilds true || echo "Warning: Timeout setting enableInlineBuilds"
+        timeout 30 yarn config set enableTelemetry false || echo "Warning: Timeout setting enableTelemetry"
+        timeout 30 yarn config set httpTimeout 300000 || echo "Warning: Timeout setting httpTimeout"
+        echo "Yarn configuration complete"
       args:
         chdir: "{{ frontend_dir }}"
         executable: /bin/bash
       environment:
-        PATH: "{{ ansible_env.HOME }}/.yarn/bin:/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
+        PATH: "/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
+      register: yarn_config
       changed_when: false
+      retries: 3
+      delay: 10
+      until: yarn_config is success
       when: inventory_hostname != 'localhost'
-
-    - name: Configure Yarn for non-interactive install
-      ansible.builtin.shell: |
-        yarn config set enableInteractive 0
-        yarn config set enableProgressBars 0
-        yarn config set enableTelemetry 0
-      args:
-        chdir: "{{ frontend_dir }}"
-        executable: /bin/bash
-      environment:
-        PATH: "{{ ansible_env.HOME }}/.yarn/bin:/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
-      changed_when: false
-      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Install dependencies with enforced timeout
       ansible.builtin.shell: |
@@ -324,36 +355,53 @@
       ignore_errors: true  # Continue even if job disappeared
       when: inventory_hostname != 'localhost'  # Only run on remote host
 
-    - name: Validate async job ID
-      ansible.builtin.debug:
-        msg: "Yarn job ID: {{ yarn_migration.ansible_job_id }}"
-      when:
-        - yarn_migration is defined
-        - inventory_hostname != 'localhost'
+    - name: Install Playwright browsers
+      ansible.builtin.shell: |
+        set -eo pipefail
+        cd {{ frontend_dir }}
+        timeout 600 yarn playwright install
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ ansible_env.HOME }}/.yarn/bin:/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
+      register: playwright_install
+      retries: 2
+      delay: 30
+      until: playwright_install is success
+      changed_when: "'downloaded' in playwright_install.stdout or 'installed' in playwright_install.stdout"
+      when: inventory_hostname != 'localhost'  # Only run on remote host
 
-    - name: Check async status
-      ansible.builtin.debug:
-        var: yarn_job_result
-      when:
-        - yarn_job_result is defined
-        - inventory_hostname != 'localhost'
+    - name: Wait for APT locks before Playwright dependencies
+      ansible.builtin.include_tasks: tasks/apt_locks.yml
+      when: inventory_hostname != 'localhost'
+
+    - name: Install Playwright system dependencies
+      become: true
+      ansible.builtin.shell: |
+        set -eo pipefail
+        cd {{ frontend_dir }}
+        yarn playwright install-deps 2>&1 | tee /tmp/playwright-deps.log || {
+          echo "Failed to install Playwright dependencies"
+          cat /tmp/playwright-deps.log
+          exit 1
+        }
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ ansible_env.HOME }}/.yarn/bin:/usr/local/bin:/usr/bin:/bin:{{ ansible_env.PATH }}"
+        DEBIAN_FRONTEND: noninteractive
+      register: playwright_deps
+      retries: 3
+      delay: 30
+      until: playwright_deps.rc == 0
+      failed_when: playwright_deps.rc != 0
+      changed_when: "'installed' in playwright_deps.stdout or 'downloading' in playwright_deps.stdout"
+      async: 180
+      poll: 5
+      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Flush handlers
       ansible.builtin.meta: flush_handlers
-
-    - name: Create Python virtual environment
-      ansible.builtin.command:
-        cmd: python3 -m venv venv
-        chdir: "{{ project_dir }}"
-        creates: "{{ project_dir }}/venv/bin/activate"
-      when: inventory_hostname != 'localhost'  # Only run on remote host
-
-    - name: Install Python dependencies
-      ansible.builtin.pip:
-        requirements: "{{ project_dir }}/backend/requirements-dev.txt"
-        virtualenv: "{{ project_dir }}/venv"
-        state: present
-      when: inventory_hostname != 'localhost'  # Only run on remote host
 
     - name: Configure backend port binding
       ansible.builtin.lineinfile:
@@ -380,6 +428,7 @@
           - backend
           - db
         build: always
+        pull: always
         state: present
       when: inventory_hostname != 'localhost'  # Only run on remote host
 
@@ -466,4 +515,9 @@
         src: "{{ template_dir }}/manage-tunnel.sh.j2"
         dest: "{{ ansible_env.HOME }}/bin/manage-tunnel"
         mode: '0755'
+      when: ansible_system == 'Darwin'
+
+    - name: Set up Mutagen for real-time file sync
+      ansible.builtin.include_role:
+        name: dev_sync
       when: ansible_system == 'Darwin'
